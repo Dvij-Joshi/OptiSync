@@ -1,0 +1,6 @@
+{
+  "name": "OptiSync",
+  "description": "Facial gesture-controlled mobile accessibility interface. Uses real-time optimized facial tracking to control screen pointer actions with adaptive sensitivity, calibration, and low hardware latency optimization.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
