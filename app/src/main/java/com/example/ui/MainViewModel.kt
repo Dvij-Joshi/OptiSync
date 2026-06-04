@@ -1,0 +1,633 @@
+package com.example.ui
+
+import android.content.Context
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.util.Log
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
+import com.example.data.GestureSettings
+import com.example.data.OptiSyncDatabase
+import com.example.data.SettingsRepository
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.launch
+import kotlin.math.max
+import kotlin.math.min
+
+// Represents a position on screen
+data class Point2D(val x: Float, val y: Float)
+
+// Simulated target inside pointing game
+data class PointTarget(val id: Int, val label: String, val point: Point2D, val color: Long, val isHit: Boolean = false)
+
+class MainViewModel(
+    private val repository: SettingsRepository,
+    context: Context
+) : ViewModel() {
+
+    private val appContext = context.applicationContext
+    private val vibrator = appContext.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+
+    // Flowing Settings
+    val settingsState: StateFlow<GestureSettings> = repository.settingsFlow
+        .stateIn(
+            scope = viewModelScope,
+            started = kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5000),
+            initialValue = GestureSettings()
+        )
+
+    // Interactive Screen Navigation
+    private val _currentTab = MutableStateFlow(0) // 0: Dashboard/Playground, 1: Calibration, 2: Settings
+    val currentTab: StateFlow<Int> = _currentTab.asStateFlow()
+
+    // Real-time tracking positions normalized to 1000x1000
+    private val _pointerPosition = MutableStateFlow(Point2D(500f, 500f))
+    val pointerPosition: StateFlow<Point2D> = _pointerPosition.asStateFlow()
+
+    // Smooth movement filtering state
+    private var rawPointerX = 500f
+    private var rawPointerY = 500f
+
+    // Live feedback tracking
+    private val _isFaceDetected = MutableStateFlow(false)
+    val isFaceDetected: StateFlow<Boolean> = _isFaceDetected.asStateFlow()
+
+    // Current eye distance
+    private val _currentEyeDistance = MutableStateFlow(0f)
+    val currentEyeDistance: StateFlow<Float> = _currentEyeDistance.asStateFlow()
+
+    // Live performance monitor stats
+    private val _trackingLatencyMs = MutableStateFlow(0L)
+    val trackingLatencyMs: StateFlow<Long> = _trackingLatencyMs.asStateFlow()
+
+    private val _cameraFps = MutableStateFlow(0)
+    val cameraFps: StateFlow<Int> = _cameraFps.asStateFlow()
+
+    private val _processingFps = MutableStateFlow(0)
+    val processingFps: StateFlow<Int> = _processingFps.asStateFlow()
+
+    // Last successful gesture trigger message and animation state
+    private val _lastGestureTriggered = MutableStateFlow<String?>(null)
+    val lastGestureTriggered: StateFlow<String?> = _lastGestureTriggered.asStateFlow()
+
+    // Target Deck Game simulator to make OptiSync fully interactive!
+    private val _targets = MutableStateFlow<List<PointTarget>>(emptyList())
+    val targets: StateFlow<List<PointTarget>> = _targets.asStateFlow()
+
+    private val _score = MutableStateFlow(0)
+    val score: StateFlow<Int> = _score.asStateFlow()
+
+    // State of face preview landmarks for custom visualization
+    private val _facePoints = MutableStateFlow<List<Point2D>>(emptyList())
+    val facePoints: StateFlow<List<Point2D>> = _facePoints.asStateFlow()
+
+    // Live tracking probabilities for custom visualization and interactive calibration
+    private val _liveLeftEyeOpen = MutableStateFlow<Float?>(null)
+    val liveLeftEyeOpen: StateFlow<Float?> = _liveLeftEyeOpen.asStateFlow()
+
+    private val _liveRightEyeOpen = MutableStateFlow<Float?>(null)
+    val liveRightEyeOpen: StateFlow<Float?> = _liveRightEyeOpen.asStateFlow()
+
+    private val _liveSmileProbability = MutableStateFlow<Float?>(null)
+    val liveSmileProbability: StateFlow<Float?> = _liveSmileProbability.asStateFlow()
+
+    private val _liveMouthOpenRatio = MutableStateFlow<Float?>(null)
+    val liveMouthOpenRatio: StateFlow<Float?> = _liveMouthOpenRatio.asStateFlow()
+
+    // Eyebrow tracking indicators
+    private val _liveBrowHeightRatio = MutableStateFlow<Float?>(null)
+    val liveBrowHeightRatio: StateFlow<Float?> = _liveBrowHeightRatio.asStateFlow()
+
+    private val _liveBrowHorizontalRatio = MutableStateFlow<Float?>(null)
+    val liveBrowHorizontalRatio: StateFlow<Float?> = _liveBrowHorizontalRatio.asStateFlow()
+
+    private val _scrollSignal = MutableStateFlow<String?>(null)
+    val scrollSignal: StateFlow<String?> = _scrollSignal.asStateFlow()
+
+    private var cameraPreviewUseCase: androidx.camera.core.Preview? = null
+
+    fun setCameraPreviewUseCase(preview: androidx.camera.core.Preview?) {
+        cameraPreviewUseCase = preview
+    }
+
+    fun getCameraPreviewUseCase(): androidx.camera.core.Preview? = cameraPreviewUseCase
+
+    fun triggerScroll(direction: String) {
+        viewModelScope.launch {
+            _scrollSignal.value = direction
+            kotlinx.coroutines.delay(150)
+            _scrollSignal.value = null
+        }
+    }
+
+    // Flag utilized to demand the Camera Analyzer resetting its neutral reference point
+    private val _recalibrateCenterRequested = MutableStateFlow(false)
+    val recalibrateCenterRequested: StateFlow<Boolean> = _recalibrateCenterRequested.asStateFlow()
+
+    fun requestCenterRecalibration() {
+        _recalibrateCenterRequested.value = true
+    }
+
+    fun onRecalibrateCenterProcessed() {
+        _recalibrateCenterRequested.value = false
+    }
+
+    // Step-by-Step Calibration Wizard:
+    // 0: Neutral Comfort Center Focus
+    // 1: Left Eye Wink Level Focus
+    // 2: Right Eye Wink Level Focus
+    // 3: Stylized Smiling Level Focus
+    // 4: Mouth Openness Ratio Focus
+    // 5: Eyebrow Raise (Scroll Up) Focus
+    // 6: Eyebrow Squint / Furrow (Scroll Down) Focus
+    // 7: Calibration Completion Scoreboard
+    private val _calibrationStep = MutableStateFlow(0)
+    val calibrationStep: StateFlow<Int> = _calibrationStep.asStateFlow()
+
+    fun setCalibrationStep(step: Int) {
+        _calibrationStep.value = step.coerceIn(0, 7)
+    }
+
+    fun advanceCalibration() {
+        _calibrationStep.value = (_calibrationStep.value + 1).coerceAtMost(7)
+    }
+
+    fun previousCalibration() {
+        _calibrationStep.value = (_calibrationStep.value - 1).coerceAtLeast(0)
+    }
+
+    fun resetCalibrationWizard() {
+        _calibrationStep.value = 0
+    }
+
+    fun captureNeutralBaseline() {
+        requestCenterRecalibration()
+        val currentDist = _currentEyeDistance.value
+        val currentBrowHeight = _liveBrowHeightRatio.value
+        viewModelScope.launch {
+            if (currentDist > 5f) {
+                val current = repository.getSettings()
+                // Personalized thresholds calculated from the restful baseline state
+                val proposedRaise = if (currentBrowHeight != null) (currentBrowHeight + 0.05f).coerceIn(0.32f, 0.55f) else current.browRaiseThreshold
+                val proposedSquint = if (currentBrowHeight != null) (currentBrowHeight - 0.05f).coerceIn(0.18f, 0.35f) else current.browSquintThreshold
+
+                repository.saveSettings(
+                    current.copy(
+                        calibrationEyeDistance = currentDist,
+                        browRaiseThreshold = proposedRaise,
+                        browSquintThreshold = proposedSquint
+                    )
+                )
+                triggerHapticFeedback()
+                _lastGestureTriggered.value = "Calibrated baseline depth and personalized eyebrow thresholds!"
+            } else {
+                triggerHapticFeedback()
+                _lastGestureTriggered.value = "Calibrated center baseline alignment!"
+            }
+        }
+    }
+
+    fun captureLeftWinkThreshold() {
+        val leftOpen = _liveLeftEyeOpen.value
+        if (leftOpen != null) {
+            viewModelScope.launch {
+                val current = repository.getSettings()
+                val proposed = (leftOpen + 0.12f).coerceIn(0.12f, 0.45f)
+                repository.saveSettings(current.copy(blinkThreshold = proposed, enableLeftEyeClick = true))
+                triggerHapticFeedback()
+                _lastGestureTriggered.value = "Saved Left Blink Threshold: ${String.format("%.2f", proposed)}"
+            }
+        }
+    }
+
+    fun captureRightWinkThreshold() {
+        val rightOpen = _liveRightEyeOpen.value
+        if (rightOpen != null) {
+            viewModelScope.launch {
+                val current = repository.getSettings()
+                val proposed = (rightOpen + 0.12f).coerceIn(0.12f, 0.45f)
+                repository.saveSettings(current.copy(blinkThreshold = proposed, enableRightEyeClick = true))
+                triggerHapticFeedback()
+                _lastGestureTriggered.value = "Saved Right Blink Threshold: ${String.format("%.2f", proposed)}"
+            }
+        }
+    }
+
+    fun captureSmileThreshold() {
+        val smile = _liveSmileProbability.value
+        if (smile != null) {
+            viewModelScope.launch {
+                val current = repository.getSettings()
+                val proposed = (smile - 0.08f).coerceIn(0.25f, 0.85f)
+                repository.saveSettings(current.copy(smileClickThreshold = proposed, enableSmileClick = true))
+                triggerHapticFeedback()
+                _lastGestureTriggered.value = "Saved Smile Threshold: ${String.format("%.2f", proposed)}"
+            }
+        }
+    }
+
+    fun captureMouthOpenThreshold() {
+        val ratio = _liveMouthOpenRatio.value
+        if (ratio != null) {
+            viewModelScope.launch {
+                val current = repository.getSettings()
+                val proposed = (ratio - 0.04f).coerceIn(0.22f, 0.65f)
+                repository.saveSettings(current.copy(mouthOpenThreshold = proposed, enableMouthOpenAction = true))
+                triggerHapticFeedback()
+                _lastGestureTriggered.value = "Saved Mouth Open Threshold: ${String.format("%.2f", proposed)}"
+            }
+        }
+    }
+
+    fun captureBrowRaiseThreshold() {
+        val browHeight = _liveBrowHeightRatio.value
+        if (browHeight != null) {
+            viewModelScope.launch {
+                val current = repository.getSettings()
+                val proposed = (browHeight - 0.02f).coerceIn(0.40f, 0.55f)
+                repository.saveSettings(current.copy(browRaiseThreshold = proposed, enableEyebrowScroll = true))
+                triggerHapticFeedback()
+                _lastGestureTriggered.value = "Saved Eyebrow Raise Threshold: ${String.format("%.2f", proposed)}"
+            }
+        }
+    }
+
+    fun captureBrowSquintThreshold() {
+        val browHeight = _liveBrowHeightRatio.value
+        if (browHeight != null) {
+            viewModelScope.launch {
+                val current = repository.getSettings()
+                val proposed = (browHeight + 0.02f).coerceIn(0.28f, 0.38f)
+                repository.saveSettings(current.copy(browSquintThreshold = proposed, enableEyebrowScroll = true))
+                triggerHapticFeedback()
+                _lastGestureTriggered.value = "Saved Eyebrow Squint Threshold: ${String.format("%.2f", proposed)}"
+            }
+        }
+    }
+
+    // Time-based debouncer block for gesture triggers
+    private var lastGestureTimeMs = 0L
+    private val gestureCooldownMs = 1200L
+
+    // Dedicated scroll debouncer
+    private var lastScrollTimeMs = 0L
+    private val scrollCooldownMs = 450L
+
+    init {
+        resetGameTargets()
+        // Save default settings if database is blank
+        viewModelScope.launch {
+            val dbSettings = repository.getSettings()
+            if (dbSettings.id != 1) { // Fresh database, write default
+                repository.saveSettings(GestureSettings())
+            }
+        }
+    }
+
+    fun setTab(index: Int) {
+        _currentTab.value = index
+    }
+
+    // Update settings in database
+    fun updatePointerSensitivity(value: Float) {
+        viewModelScope.launch {
+            val current = repository.getSettings()
+            repository.saveSettings(current.copy(pointerSensitivity = value))
+        }
+    }
+
+    fun updateSmileClickThreshold(value: Float) {
+        viewModelScope.launch {
+            val current = repository.getSettings()
+            repository.saveSettings(current.copy(smileClickThreshold = value))
+        }
+    }
+
+    fun updateBlinkThreshold(value: Float) {
+        viewModelScope.launch {
+            val current = repository.getSettings()
+            repository.saveSettings(current.copy(blinkThreshold = value))
+        }
+    }
+
+    fun updateMouthOpenThreshold(value: Float) {
+        viewModelScope.launch {
+            val current = repository.getSettings()
+            repository.saveSettings(current.copy(mouthOpenThreshold = value))
+        }
+    }
+
+    fun toggleEyebrowScroll(enabled: Boolean) {
+        viewModelScope.launch {
+            val current = repository.getSettings()
+            repository.saveSettings(current.copy(enableEyebrowScroll = enabled))
+        }
+    }
+
+    fun updateBrowRaiseThreshold(value: Float) {
+        viewModelScope.launch {
+            val current = repository.getSettings()
+            repository.saveSettings(current.copy(browRaiseThreshold = value))
+        }
+    }
+
+    fun updateBrowSquintThreshold(value: Float) {
+        viewModelScope.launch {
+            val current = repository.getSettings()
+            repository.saveSettings(current.copy(browSquintThreshold = value))
+        }
+    }
+
+    fun toggleLeftEyeClick(enabled: Boolean) {
+        viewModelScope.launch {
+            val current = repository.getSettings()
+            repository.saveSettings(current.copy(enableLeftEyeClick = enabled))
+        }
+    }
+
+    fun toggleRightEyeClick(enabled: Boolean) {
+        viewModelScope.launch {
+            val current = repository.getSettings()
+            repository.saveSettings(current.copy(enableRightEyeClick = enabled))
+        }
+    }
+
+    fun toggleSmileClick(enabled: Boolean) {
+        viewModelScope.launch {
+            val current = repository.getSettings()
+            repository.saveSettings(current.copy(enableSmileClick = enabled))
+        }
+    }
+
+    fun toggleMouthOpen(enabled: Boolean) {
+        viewModelScope.launch {
+            val current = repository.getSettings()
+            repository.saveSettings(current.copy(enableMouthOpenAction = enabled))
+        }
+    }
+
+    fun toggleHaptics(enabled: Boolean) {
+        viewModelScope.launch {
+            val current = repository.getSettings()
+            repository.saveSettings(current.copy(hapticFeedbackEnabled = enabled))
+        }
+    }
+
+    fun updateFrameSkipCount(count: Int) {
+        viewModelScope.launch {
+            val current = repository.getSettings()
+            repository.saveSettings(current.copy(frameSkipCount = count))
+        }
+    }
+
+    // Calibrate baseline positioning
+    fun calibrateBaseline() {
+        viewModelScope.launch {
+            val currentDist = _currentEyeDistance.value
+            if (currentDist > 5f) {
+                val current = repository.getSettings()
+                repository.saveSettings(current.copy(calibrationEyeDistance = currentDist))
+                triggerHapticFeedback()
+                _lastGestureTriggered.value = "Calibrated baseline eye distance: ${currentDist.toInt()}px"
+            }
+        }
+    }
+
+    // Feed camera tracking outputs
+    fun updateTrackData(
+        faceDetected: Boolean,
+        noseX: Float?,
+        noseY: Float?,
+        eyeDist: Float,
+        leftEyeOpen: Float?,
+        rightEyeOpen: Float?,
+        smileProb: Float?,
+        mouthOpenRatio: Float?,
+        browHeightRatio: Float?,
+        browHorizontalRatio: Float?,
+        latency: Long,
+        procFps: Int,
+        camFps: Int,
+        landmarks: List<Point2D>
+    ) {
+        _isFaceDetected.value = faceDetected
+        _trackingLatencyMs.value = latency
+        _processingFps.value = procFps
+        _cameraFps.value = camFps
+        _facePoints.value = landmarks
+
+        if (!faceDetected || noseX == null || noseY == null) {
+            return
+        }
+
+        _currentEyeDistance.value = eyeDist
+
+        // Feed live variables for interactive calibration meters
+        _liveLeftEyeOpen.value = leftEyeOpen
+        _liveRightEyeOpen.value = rightEyeOpen
+        _liveSmileProbability.value = smileProb
+        _liveMouthOpenRatio.value = mouthOpenRatio
+        _liveBrowHeightRatio.value = browHeightRatio
+        _liveBrowHorizontalRatio.value = browHorizontalRatio
+
+        // Read settings directly from StateFlow
+        val settings = settingsState.value
+
+        // Distance scaling computation: Sensity is scaled based on how far the user is compared to calibration
+        // If currentEyeDistance is small (farther away), scale factor is larger to keep responsiveness high!
+        val calEyeDist = if (settings.calibrationEyeDistance > 10f) settings.calibrationEyeDistance else 110f
+        val distanceScale = if (eyeDist > 5f) calEyeDist / eyeDist else 1.0f
+        
+        // Final responsive sensitivity
+        val dynamicSensitivity = settings.pointerSensitivity * distanceScale
+
+        // Non-linear coordinate amplification to reach all screen corners effortlessly.
+        // It provides high precision (low velocity) near the center but speeds up comfortable screen boundary access.
+        val curvedX = noseX * (1.0f + 0.15f * Math.abs(noseX))
+        val curvedY = noseY * (1.0f + 0.15f * Math.abs(noseY))
+
+        // Calculate delta (mirrored coordinates on horizontal since camera faces user)
+        val dX = -curvedX * dynamicSensitivity
+        val dY = curvedY * dynamicSensitivity
+
+        // Center on screen + displacement
+        val targetX = 500f + dX
+        val targetY = 500f + dY
+
+        // Interpolate for seamless movement (Exponential low-pass filter alpha is 0.25f)
+        val alpha = 0.25f
+        rawPointerX = rawPointerX * (1f - alpha) + targetX * alpha
+        rawPointerY = rawPointerY * (1f - alpha) + targetY * alpha
+
+        // Clamping to screen space coordinates
+        val clampedX = max(20f, min(980f, rawPointerX))
+        val clampedY = max(20f, min(980f, rawPointerY))
+
+        _pointerPosition.value = Point2D(clampedX, clampedY)
+
+        // Evaluate gesture actions with debounces
+        val now = System.currentTimeMillis()
+        if (now - lastGestureTimeMs > gestureCooldownMs) {
+            var gestureName: String? = null
+
+            // Suppress accidental winks when looking down (noseY is positive when looking down)
+            val isLookingDown = noseY > 12f
+
+            // Determine if an eyebrow action is actively performed to ignore clicks/winks
+            val isEyebrowGestureActive = settings.enableEyebrowScroll && browHeightRatio != null &&
+                    (browHeightRatio > settings.browRaiseThreshold || browHeightRatio < settings.browSquintThreshold)
+
+            // 1. Right Eye Wink Action (Click/Trigger)
+            if (settings.enableRightEyeClick && rightEyeOpen != null && leftEyeOpen != null && !isLookingDown && !isEyebrowGestureActive) {
+                if (rightEyeOpen < settings.blinkThreshold && leftEyeOpen > (settings.blinkThreshold + 0.35f)) {
+                    gestureName = "Right Eye Wink (Click/Trigger)"
+                }
+            }
+
+            // 2. Left Eye Wink Action (Click/Trigger)
+            if (settings.enableLeftEyeClick && leftEyeOpen != null && rightEyeOpen != null && !isLookingDown && !isEyebrowGestureActive) {
+                if (leftEyeOpen < settings.blinkThreshold && rightEyeOpen > (settings.blinkThreshold + 0.35f)) {
+                    gestureName = "Left Eye Wink (Back/Option)"
+                }
+            }
+
+            // 3. Smile Action (Main Select click)
+            if (settings.enableSmileClick && smileProb != null) {
+                if (smileProb > settings.smileClickThreshold) {
+                    gestureName = "Stylized Smile (Confirm/Select)"
+                }
+            }
+
+            // 4. Mouth Stretch / Open Action
+            if (settings.enableMouthOpenAction && mouthOpenRatio != null) {
+                if (mouthOpenRatio > settings.mouthOpenThreshold) {
+                    gestureName = "Mouth Opened (Home Menu)"
+                }
+            }
+
+            if (gestureName != null) {
+                lastGestureTimeMs = now
+                _lastGestureTriggered.value = gestureName
+                if (settings.hapticFeedbackEnabled) {
+                    triggerHapticFeedback()
+                }
+                
+                // Fire action in game simulation!
+                handleSimulatedClick(Point2D(clampedX, clampedY))
+            }
+        }
+
+        // Evaluate continuous eyebrow scrolling gestures independently with a much faster debounce (450ms)
+        if (settings.enableEyebrowScroll && browHeightRatio != null) {
+            if (now - lastScrollTimeMs > scrollCooldownMs) {
+                if (browHeightRatio > settings.browRaiseThreshold) {
+                    lastScrollTimeMs = now
+                    _lastGestureTriggered.value = "Raise Eyebrows (Scroll Up)"
+                    triggerScroll("UP")
+                    if (settings.hapticFeedbackEnabled) {
+                        triggerHapticFeedback()
+                    }
+                } else if (browHeightRatio < settings.browSquintThreshold) {
+                    lastScrollTimeMs = now
+                    _lastGestureTriggered.value = "Squint Eyebrows (Scroll Down)"
+                    triggerScroll("DOWN")
+                    if (settings.hapticFeedbackEnabled) {
+                        triggerHapticFeedback()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun triggerHapticFeedback() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vibrator.vibrate(VibrationEffect.createOneShot(80, VibrationEffect.DEFAULT_AMPLITUDE))
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator.vibrate(80)
+            }
+        } catch (e: Exception) {
+            Log.e("OptiSync", "Haptic feedback error", e)
+        }
+    }
+
+    // Reset simulator game targets
+    fun resetGameTargets() {
+        _score.value = 0
+        _targets.value = listOf(
+            PointTarget(1, "Menu", Point2D(150f, 150f), 0xFFE91E63),
+            PointTarget(2, "Photos", Point2D(500f, 250f), 0xFF2196F3),
+            PointTarget(3, "Settings", Point2D(850f, 150f), 0xFF4CAF50),
+            PointTarget(4, "Messages", Point2D(200f, 500f), 0xFFFF9800),
+            PointTarget(5, "OptiPlay", Point2D(800f, 500f), 0xFF9C27B0),
+            PointTarget(6, "Browser", Point2D(300f, 800f), 0xFF00BCD4),
+            PointTarget(7, "Home Deck", Point2D(700f, 800f), 0xFF009688)
+        )
+    }
+
+    private fun handleSimulatedClick(pointer: Point2D) {
+        val currentTargets = _targets.value.toMutableList()
+        var hitIndex = -1
+        
+        // Detect if pointer is overlapping with any simulated tile (hitbox of 120 width/height)
+        for (i in currentTargets.indices) {
+            val target = currentTargets[i]
+            val xDistance = Math.abs(pointer.x - target.point.x)
+            val yDistance = Math.abs(pointer.y - target.point.y)
+            if (xDistance < 90f && yDistance < 90f && !target.isHit) {
+                hitIndex = i
+                break
+            }
+        }
+
+        if (hitIndex != -1) {
+            val target = currentTargets[hitIndex]
+            currentTargets[hitIndex] = target.copy(isHit = true)
+            _targets.value = currentTargets
+            _score.value = _score.value + 1
+            
+            // Auto respawn target or show custom trigger state
+            viewModelScope.launch {
+                kotlinx.coroutines.delay(1000)
+                // Bring it back with a randomized position for premium gameplay look!
+                val currentTargetsRefresh = _targets.value.toMutableList()
+                val refreshedTarget = currentTargetsRefresh.firstOrNull { it.id == target.id }
+                if (refreshedTarget != null) {
+                    val idx = currentTargetsRefresh.indexOf(refreshedTarget)
+                    val newX = (150..850).random().toFloat()
+                    val newY = (150..850).random().toFloat()
+                    currentTargetsRefresh[idx] = refreshedTarget.copy(
+                        point = Point2D(newX, newY),
+                        isHit = false
+                    )
+                    _targets.value = currentTargetsRefresh
+                }
+            }
+        }
+    }
+
+    fun clearGestureNotification() {
+        _lastGestureTriggered.value = null
+    }
+
+    class Factory(
+        private val repository: SettingsRepository,
+        private val context: Context
+    ) : ViewModelProvider.Factory {
+        @Suppress("UNCHECKED_CAST")
+        override fun <T : ViewModel> create(modelClass: Class<T>): T {
+            if (modelClass.isAssignableFrom(MainViewModel::class.java)) {
+                return MainViewModel(repository, context) as T
+            }
+            throw IllegalArgumentException("Unknown ViewModel class")
+        }
+    }
+}
