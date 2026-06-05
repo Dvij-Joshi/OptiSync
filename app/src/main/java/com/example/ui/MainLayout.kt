@@ -215,6 +215,7 @@ fun BoxScope.CameraHandler(viewModel: MainViewModel) {
         // Simple graphical tracking circle to show detection status without wasting energy processing preview views
         val isFaceDetected by viewModel.isFaceDetected.collectAsState()
         val facePoints by viewModel.facePoints.collectAsState()
+        val imageDimensions by viewModel.imageDimensions.collectAsState()
 
         Canvas(modifier = Modifier.fillMaxSize()) {
             val center = Offset(size.width / 2f, size.height / 2f)
@@ -227,13 +228,44 @@ fun BoxScope.CameraHandler(viewModel: MainViewModel) {
             )
 
             if (isFaceDetected && facePoints.isNotEmpty()) {
+                // FILL_CENTER Transform Logic:
+                // Image from camera is landscape (pW x pH, e.g. 480x360).
+                // The front camera is rotated 270 degrees.
+                // In 270-deg rotation, the landscape image's Y axis maps to portrait X axis, X maps to Y.
+                // After 270-deg CCW rotation and horizontal mirror (for front camera):
+                // rotated_u = 1.0 - v
+                // rotated_v = u
+                //
+                // Next, the PreviewView applies FILL_CENTER scaling to fill the Canvas.
+                // It scales by max(canvas_width / rotated_width, canvas_height / rotated_height).
+                val rotatedW = imageDimensions.second.toFloat() // 360
+                val rotatedH = imageDimensions.first.toFloat()  // 480
+                
+                val scale = maxOf(size.width / rotatedW, size.height / rotatedH)
+                val scaledW = rotatedW * scale
+                val scaledH = rotatedH * scale
+                
+                // The scaled image is centered in the Canvas.
+                val offsetX = (size.width - scaledW) / 2f
+                val offsetY = (size.height - scaledH) / 2f
+                
+                // Map a raw sensor point (u, v) to canvas coordinates
+                fun mapPoint(pt: Point2D): Offset {
+                    val rotU = 1f - pt.y // 1.0 - v
+                    val rotV = pt.x      // u
+                    return Offset(
+                        x = offsetX + rotU * scaledW,
+                        y = offsetY + rotV * scaledH
+                    )
+                }
+
                 // Nose Tip
                 val nosePoint = facePoints.firstOrNull()
                 if (nosePoint != null) {
                     drawCircle(
                         color = Color(0xFF00E5FF),
                         radius = 4.dp.toPx(),
-                        center = Offset(nosePoint.x * size.width, nosePoint.y * size.height)
+                        center = mapPoint(nosePoint)
                     )
                 }
 
@@ -242,7 +274,7 @@ fun BoxScope.CameraHandler(viewModel: MainViewModel) {
                     drawCircle(
                         color = Color.White.copy(alpha = 0.8f),
                         radius = 2.5f.dp.toPx(),
-                        center = Offset(pt.x * size.width, pt.y * size.height)
+                        center = mapPoint(pt)
                     )
                 }
             } else {
