@@ -16,7 +16,7 @@ class GestureAnalyzer(
     private val viewModel: MainViewModel
 ) : ImageAnalysis.Analyzer {
 
-    // Configure low-latency on-device face detector with eyebrow contours enabled
+    // Configure low-latency on-device face detector with eyebrow contours + classification
     private val options = FaceDetectorOptions.Builder()
         .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
         .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
@@ -30,6 +30,10 @@ class GestureAnalyzer(
     // Baseline centered nose reference to track relative displacement delta
     private var neutralNoseX: Float? = null
     private var neutralNoseY: Float? = null
+
+    // Exponential moving average for browHeightRatio — eliminates single-frame noise spikes
+    private var emaBrowHeight: Float? = null
+    private val emaBrowAlpha = 0.30f // Higher = more responsive, lower = smoother
 
     // Real-time calculations for performance overlays
     private var frameCount = 0
@@ -74,7 +78,7 @@ class GestureAnalyzer(
             return
         }
 
-        // 2. Performance optimizer: skip frames if we want to reduce processing loads on older hardware
+        // 2. Performance optimizer: skip frames on older hardware
         val settings = viewModel.settingsState.value
         val frameSkip = settings.frameSkipCount
         if (frameSkip > 0) {
@@ -125,11 +129,15 @@ class GestureAnalyzer(
                 val noseLandmark = face.getLandmark(FaceLandmark.NOSE_BASE)
                 val leftEyeLandmark = face.getLandmark(FaceLandmark.LEFT_EYE)
                 val rightEyeLandmark = face.getLandmark(FaceLandmark.RIGHT_EYE)
-                val mouthBottomLandmark = face.getLandmark(FaceLandmark.MOUTH_BOTTOM)
 
-                // Extract Eyebrows Contours (LEFT_EYEBROW_TOP and RIGHT_EYEBROW_TOP)
-                val leftEyebrowContour = face.getContour(com.google.mlkit.vision.face.FaceContour.LEFT_EYEBROW_TOP)?.points
-                val rightEyebrowContour = face.getContour(com.google.mlkit.vision.face.FaceContour.RIGHT_EYEBROW_TOP)?.points
+                // Only compute mouth when feature is enabled (saves cycles + stops false detections)
+                val mouthBottomLandmark = if (settings.enableMouthOpenAction) {
+                    face.getLandmark(FaceLandmark.MOUTH_BOTTOM)
+                } else null
+
+                // Extract Eyebrow Contours (used for scroll gesture)
+                val leftEyebrowContour = face.getContour(FaceContour.LEFT_EYEBROW_TOP)?.points
+                val rightEyebrowContour = face.getContour(FaceContour.RIGHT_EYEBROW_TOP)?.points
 
                 var browHeightRatio: Float? = null
                 var browHorizontalRatio: Float? = null
@@ -139,7 +147,7 @@ class GestureAnalyzer(
                     val leftPos = leftEyeLandmark.position
                     val rightPos = rightEyeLandmark.position
 
-                    // Estimate camera eye distance in pixels
+                    // Inter-eye distance — used for adaptive sensitivity + normalization
                     val eyeDistance = sqrt(
                         (leftPos.x - rightPos.x).pow(2) + (leftPos.y - rightPos.y).pow(2)
                     )
@@ -154,15 +162,20 @@ class GestureAnalyzer(
                         val leftEyeY = leftPos.y
                         val rightEyeY = rightPos.y
 
-                        // Vertical distance from eye (larger Y in screen space coords since Y is down) to eyebrow (smaller Y)
+                        // Vertical distance eye → eyebrow, normalized by inter-eye distance
                         val leftBrowHeight = leftEyeY - leftEyebrowY
                         val rightBrowHeight = rightEyeY - rightEyebrowY
 
                         val normLeftBrowHeight = leftBrowHeight / eyeDistance
                         val normRightBrowHeight = rightBrowHeight / eyeDistance
-                        browHeightRatio = (normLeftBrowHeight + normRightBrowHeight) / 2.0f
+                        val rawBrowHeight = (normLeftBrowHeight + normRightBrowHeight) / 2.0f
 
-                        // Horizontal normalized space between eyebrows
+                        // EMA smoothing — prevents single noisy frames from firing scroll gestures
+                        emaBrowHeight = if (emaBrowHeight == null) rawBrowHeight
+                        else emaBrowHeight!! * (1f - emaBrowAlpha) + rawBrowHeight * emaBrowAlpha
+
+                        browHeightRatio = emaBrowHeight
+
                         val eyebrowHorizontalDist = Math.abs(rightEyebrowX - leftEyebrowX)
                         browHorizontalRatio = eyebrowHorizontalDist / eyeDistance
                     }
@@ -173,52 +186,37 @@ class GestureAnalyzer(
                         neutralNoseY = nosePos.y
                     }
 
-                    // Displacement from centered anchor
                     val noseDeltaX = nosePos.x - neutralNoseX!!
                     val noseDeltaY = nosePos.y - neutralNoseY!!
 
-                    // Normalized Mouth opened mouth height extraction using ratio scaling to prevent distance variance
+                    // Mouth open ratio — anchored to eye midpoint, not nose
+                    // Eye midpoint is stable across head tilts; nose-to-mouth was not.
                     var mouthRatio = 0.0f
-                    if (mouthBottomLandmark != null) {
-                        val noseToMouthDist = sqrt(
-                            (nosePos.x - mouthBottomLandmark.position.x).pow(2) +
-                            (nosePos.y - mouthBottomLandmark.position.y).pow(2)
+                    if (settings.enableMouthOpenAction && mouthBottomLandmark != null) {
+                        val eyeMidX = (leftPos.x + rightPos.x) / 2f
+                        val eyeMidY = (leftPos.y + rightPos.y) / 2f
+                        val eyeMidToMouthDist = sqrt(
+                            (eyeMidX - mouthBottomLandmark.position.x).pow(2) +
+                            (eyeMidY - mouthBottomLandmark.position.y).pow(2)
                         )
-                        // Distance normalized against current eyeDistance
-                        if (eyeDistance > 10f) {
-                            mouthRatio = noseToMouthDist / eyeDistance
+                        val eyeDistance2 = sqrt(
+                            (leftPos.x - rightPos.x).pow(2) + (leftPos.y - rightPos.y).pow(2)
+                        )
+                        if (eyeDistance2 > 10f) {
+                            mouthRatio = eyeMidToMouthDist / eyeDistance2
                         }
                     }
 
-                    // Convert basic landmarks to 2D coordinates normalized for custom visualization
-                    val visualPoints = mutableListOf<Point2D>()
-                    val pW = imageProxy.width.toFloat()
-                    val pH = imageProxy.height.toFloat()
-                    if (pW > 1f && pH > 1f) {
-                        val rawPoints = mutableListOf<android.graphics.PointF>()
-                        
-                        // Add standard landmarks
-                        face.allLandmarks.forEach { rawPoints.add(it.position) }
-                        
-                        // Add eyebrow contour points to show active eyebrow tracking visually
-                        leftEyebrowContour?.forEach { rawPoints.add(it) }
-                        rightEyebrowContour?.forEach { rawPoints.add(it) }
-                        
-                        rawPoints.forEach { pos ->
-                            val u = pos.x / pW
-                            val v = pos.y / pH
-                            
-                            val mapped = when (imageRotation) {
-                                90 -> Point2D(1f - v, u)
-                                180 -> Point2D(1f - u, 1f - v)
-                                270 -> Point2D(v, 1f - u)
-                                else -> Point2D(u, v)
-                            }
-                            visualPoints.add(mapped)
-                        }
-                    }
+                    // Build selective visual landmark list — only points relevant to gesture control
+                    val visualPoints = buildSelectiveLandmarkPoints(
+                        face = face,
+                        imageProxy = imageProxy,
+                        imageRotation = imageRotation,
+                        leftEyebrowContour = leftEyebrowContour,
+                        rightEyebrowContour = rightEyebrowContour,
+                        includeMouth = settings.enableMouthOpenAction
+                    )
 
-                    // Update ViewModel tracking data
                     viewModel.updateTrackData(
                         faceDetected = true,
                         noseX = noseDeltaX,
@@ -259,5 +257,71 @@ class GestureAnalyzer(
                 Log.e("OptiSyncAnal", "Face detection execution failure", e)
                 imageProxy.close()
             }
+    }
+
+    /**
+     * Build a selective set of landmark points for overlay rendering.
+     *
+     * Only includes: LEFT_EYE, RIGHT_EYE, NOSE_BASE, left/right eyebrow contours,
+     * and optionally mouth landmarks when enabled.
+     *
+     * Coordinate mapping corrected for front camera:
+     * - The image from the front camera arrives rotated (usually 270° in portrait).
+     * - ML Kit coordinates are in the sensor image space (not mirrored).
+     * - We apply the rotation transform then let the canvas mirror via (1-x).
+     */
+    private fun buildSelectiveLandmarkPoints(
+        face: com.google.mlkit.vision.face.Face,
+        imageProxy: ImageProxy,
+        imageRotation: Int,
+        leftEyebrowContour: List<android.graphics.PointF>?,
+        rightEyebrowContour: List<android.graphics.PointF>?,
+        includeMouth: Boolean
+    ): List<Point2D> {
+        val pW = imageProxy.width.toFloat()
+        val pH = imageProxy.height.toFloat()
+        if (pW <= 1f || pH <= 1f) return emptyList()
+
+        val rawPoints = mutableListOf<android.graphics.PointF>()
+
+        // Core tracking landmarks only
+        val coreLandmarkTypes = mutableListOf(
+            FaceLandmark.LEFT_EYE,
+            FaceLandmark.RIGHT_EYE,
+            FaceLandmark.NOSE_BASE
+        )
+        if (includeMouth) {
+            coreLandmarkTypes.add(FaceLandmark.MOUTH_BOTTOM)
+            coreLandmarkTypes.add(FaceLandmark.MOUTH_LEFT)
+            coreLandmarkTypes.add(FaceLandmark.MOUTH_RIGHT)
+        }
+
+        coreLandmarkTypes.forEach { type ->
+            face.getLandmark(type)?.position?.let { rawPoints.add(it) }
+        }
+
+        // Eyebrow contour points for visual feedback during calibration
+        leftEyebrowContour?.forEach { rawPoints.add(it) }
+        rightEyebrowContour?.forEach { rawPoints.add(it) }
+
+        // Left/right eye contours for better visual representation
+        face.getContour(FaceContour.LEFT_EYE)?.points?.forEach { rawPoints.add(it) }
+        face.getContour(FaceContour.RIGHT_EYE)?.points?.forEach { rawPoints.add(it) }
+
+        return rawPoints.map { pos ->
+            val u = pos.x / pW
+            val v = pos.y / pH
+
+            // FIXED: Front camera coordinate mapping.
+            // The 90° and 270° cases were previously swapped, causing the mesh to
+            // appear on the wrong side. Now correctly handles front camera portrait orientation.
+            // Canvas applies (1f - pt.x) for horizontal mirroring to match the selfie preview.
+            when (imageRotation) {
+                90  -> Point2D(v, u)           // Fixed: was Point2D(1f - v, u)
+                180 -> Point2D(u, 1f - v)      // 180° flip
+                270 -> Point2D(1f - v, u)      // Fixed: was Point2D(v, 1f - u)
+                else -> Point2D(u, v)           // 0° — canvas (1-u) handles mirror
+            }
+        }
     }
 }

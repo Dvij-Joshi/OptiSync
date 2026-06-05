@@ -251,7 +251,8 @@ class MainViewModel(
         if (browHeight != null) {
             viewModelScope.launch {
                 val current = repository.getSettings()
-                val proposed = (browHeight - 0.02f).coerceIn(0.40f, 0.55f)
+                // Threshold is slightly BELOW peak so any value above it fires the gesture
+                val proposed = (browHeight - 0.03f).coerceIn(0.25f, 0.65f)
                 repository.saveSettings(current.copy(browRaiseThreshold = proposed, enableEyebrowScroll = true))
                 triggerHapticFeedback()
                 _lastGestureTriggered.value = "Saved Eyebrow Raise Threshold: ${String.format("%.2f", proposed)}"
@@ -264,11 +265,64 @@ class MainViewModel(
         if (browHeight != null) {
             viewModelScope.launch {
                 val current = repository.getSettings()
-                val proposed = (browHeight + 0.02f).coerceIn(0.28f, 0.38f)
+                // Threshold is slightly ABOVE squint peak so any value below it fires the gesture
+                val proposed = (browHeight + 0.03f).coerceIn(0.12f, 0.38f)
                 repository.saveSettings(current.copy(browSquintThreshold = proposed, enableEyebrowScroll = true))
                 triggerHapticFeedback()
                 _lastGestureTriggered.value = "Saved Eyebrow Squint Threshold: ${String.format("%.2f", proposed)}"
             }
+        }
+    }
+
+    /**
+     * Full calibration save — computes all thresholds from captured rest + peak values
+     * following the spec formula: threshold = rest + (peak - rest) × 0.65
+     *
+     * @param restBrow       Average brow height at neutral/rest
+     * @param peakBrowUp     Average brow height while fully raising eyebrows
+     * @param peakBrowDown   Average brow height while fully squinting/furrowing
+     * @param peakBlinkR     Average right eye open probability while winking right (should be low)
+     * @param peakBlinkL     Average left eye open probability while winking left (should be low)
+     * @param refEyeDist     Eye distance captured at calibration distance
+     */
+    fun saveFullCalibration(
+        restBrow: Float,
+        peakBrowUp: Float,
+        peakBrowDown: Float,
+        peakBlinkR: Float,
+        peakBlinkL: Float,
+        refEyeDist: Float
+    ) {
+        viewModelScope.launch {
+            val current = repository.getSettings()
+
+            // Brow raise threshold: 65% of the way from rest to peak raise
+            val browRaise = restBrow + (peakBrowUp - restBrow) * 0.65f
+
+            // Brow squint threshold: 65% of the way from rest down to peak squint
+            val browSquint = restBrow - (restBrow - peakBrowDown) * 0.65f
+
+            // Blink threshold: midpoint between winking (peak = small value) and open (rest ≈ 0.9)
+            // Average the two eyes' wink values, then set threshold halfway between wink and open
+            val avgWink = (peakBlinkR + peakBlinkL) / 2f
+            val blinkThresh = (avgWink + 0.90f) / 2f   // halfway between wink and fully open
+
+            repository.saveSettings(
+                current.copy(
+                    calibrationEyeDistance = refEyeDist,
+                    restBrowHeightRatio = restBrow,
+                    peakBrowUpRatio = peakBrowUp,
+                    peakBrowDownRatio = peakBrowDown,
+                    browRaiseThreshold = browRaise.coerceIn(0.20f, 0.70f),
+                    browSquintThreshold = browSquint.coerceIn(0.10f, 0.40f),
+                    blinkThreshold = blinkThresh.coerceIn(0.10f, 0.60f),
+                    enableEyebrowScroll = true,
+                    calibrationVersion = current.calibrationVersion + 1
+                )
+            )
+            requestCenterRecalibration()
+            triggerHapticFeedback()
+            _lastGestureTriggered.value = "✓ Full calibration saved!"
         }
     }
 
@@ -279,6 +333,10 @@ class MainViewModel(
     // Dedicated scroll debouncer
     private var lastScrollTimeMs = 0L
     private val scrollCooldownMs = 450L
+
+    // Mouth open hold-timer — requires sustained detection before triggering (prevents false positives)
+    private var mouthOpenStartMs = 0L
+    private val mouthOpenHoldMs = 220L  // must hold for 220ms
 
     init {
         resetGameTargets()
@@ -505,10 +563,16 @@ class MainViewModel(
                 }
             }
 
-            // 4. Mouth Stretch / Open Action
+            // 4. Mouth Stretch / Open Action — requires 220ms hold to avoid random triggers
             if (settings.enableMouthOpenAction && mouthOpenRatio != null) {
                 if (mouthOpenRatio > settings.mouthOpenThreshold) {
-                    gestureName = "Mouth Opened (Home Menu)"
+                    if (mouthOpenStartMs == 0L) mouthOpenStartMs = now
+                    if (now - mouthOpenStartMs >= mouthOpenHoldMs) {
+                        gestureName = "Mouth Opened (Home Menu)"
+                        mouthOpenStartMs = 0L
+                    }
+                } else {
+                    mouthOpenStartMs = 0L // reset hold timer if mouth closes
                 }
             }
 
