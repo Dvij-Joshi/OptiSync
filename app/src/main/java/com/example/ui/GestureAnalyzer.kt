@@ -113,6 +113,7 @@ class GestureAnalyzer(
                         mouthOpenRatio = null,
                         browHeightRatio = null,
                         browHorizontalRatio = null,
+                        isHeadStill = false,
                         latency = latency,
                         procFps = activeProcessFps,
                         camFps = activeCameraFps,
@@ -124,6 +125,11 @@ class GestureAnalyzer(
 
                 // Pick the largest/closest face
                 val face = faces.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() } ?: faces[0]
+
+                // Head pose — suppress gesture triggers during head movement
+                val headYaw   = face.headEulerAngleY  // left/right rotation
+                val headPitch = face.headEulerAngleX  // up/down tilt
+                val isHeadStill = Math.abs(headYaw) < 15f && Math.abs(headPitch) < 12f
 
                 // Extract core control landmarks
                 val noseLandmark = face.getLandmark(FaceLandmark.NOSE_BASE)
@@ -228,6 +234,7 @@ class GestureAnalyzer(
                         mouthOpenRatio = mouthRatio,
                         browHeightRatio = browHeightRatio,
                         browHorizontalRatio = browHorizontalRatio,
+                        isHeadStill = isHeadStill,
                         latency = latency,
                         procFps = activeProcessFps,
                         camFps = activeCameraFps,
@@ -245,6 +252,7 @@ class GestureAnalyzer(
                         mouthOpenRatio = null,
                         browHeightRatio = null,
                         browHorizontalRatio = null,
+                        isHeadStill = false,
                         latency = latency,
                         procFps = activeProcessFps,
                         camFps = activeCameraFps,
@@ -317,10 +325,12 @@ class GestureAnalyzer(
             // appear on the wrong side. Now correctly handles front camera portrait orientation.
             // Canvas applies (1f - pt.x) for horizontal mirroring to match the selfie preview.
             when (imageRotation) {
-                90  -> Point2D(v, u)           // Fixed: was Point2D(1f - v, u)
-                180 -> Point2D(u, 1f - v)      // 180° flip
-                270 -> Point2D(1f - v, u)      // Fixed: was Point2D(v, 1f - u)
-                else -> Point2D(u, v)           // 0° — canvas (1-u) handles mirror
+                // For each case: canvas renders (1-pt.x)*W for x (mirroring),  pt.y*H for y.
+                // Math verified against front-camera 90°/270° rotation geometry.
+                90  -> Point2D(v, 1f - u)      // 90° CCW: pt.x=v → canvas=(1-v)W; pt.y=(1-u) → (1-u)H ✓
+                180 -> Point2D(1f - u, v)      // 180°: pt.x=(1-u) → uW; pt.y=v → vH ✓
+                270 -> Point2D(1f - v, u)      // 270° CCW: pt.x=(1-v) → vW; pt.y=u → uH ✓
+                else -> Point2D(u, v)           // 0°: pt.x=u → (1-u)W (mirror); pt.y=v ✓
             }
         }
     }

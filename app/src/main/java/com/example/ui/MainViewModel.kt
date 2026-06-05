@@ -88,6 +88,10 @@ class MainViewModel(
     private val _facePoints = MutableStateFlow<List<Point2D>>(emptyList())
     val facePoints: StateFlow<List<Point2D>> = _facePoints.asStateFlow()
 
+    // Head-still indicator — true when head pose is within acceptable movement range
+    private val _isHeadStill = MutableStateFlow(false)
+    val isHeadStill: StateFlow<Boolean> = _isHeadStill.asStateFlow()
+
     // Live tracking probabilities for custom visualization and interactive calibration
     private val _liveLeftEyeOpen = MutableStateFlow<Float?>(null)
     val liveLeftEyeOpen: StateFlow<Float?> = _liveLeftEyeOpen.asStateFlow()
@@ -470,12 +474,14 @@ class MainViewModel(
         mouthOpenRatio: Float?,
         browHeightRatio: Float?,
         browHorizontalRatio: Float?,
+        isHeadStill: Boolean,
         latency: Long,
         procFps: Int,
         camFps: Int,
         landmarks: List<Point2D>
     ) {
         _isFaceDetected.value = faceDetected
+        _isHeadStill.value = isHeadStill
         _trackingLatencyMs.value = latency
         _processingFps.value = procFps
         _cameraFps.value = camFps
@@ -539,32 +545,35 @@ class MainViewModel(
             val isLookingDown = noseY > 12f
 
             // Determine if an eyebrow action is actively performed to ignore clicks/winks
-            val isEyebrowGestureActive = settings.enableEyebrowScroll && browHeightRatio != null &&
+            // Also gated on isHeadStill: head movement = no eyebrow gestures
+            val isEyebrowGestureActive = settings.enableEyebrowScroll && isHeadStill && browHeightRatio != null &&
                     (browHeightRatio > settings.browRaiseThreshold || browHeightRatio < settings.browSquintThreshold)
 
-            // 1. Right Eye Wink Action (Click/Trigger)
-            if (settings.enableRightEyeClick && rightEyeOpen != null && leftEyeOpen != null && !isLookingDown && !isEyebrowGestureActive) {
+            // 1. Right Eye Wink Action (Click/Trigger) — suppressed when head is moving
+            if (settings.enableRightEyeClick && rightEyeOpen != null && leftEyeOpen != null
+                    && isHeadStill && !isLookingDown && !isEyebrowGestureActive) {
                 if (rightEyeOpen < settings.blinkThreshold && leftEyeOpen > (settings.blinkThreshold + 0.35f)) {
                     gestureName = "Right Eye Wink (Click/Trigger)"
                 }
             }
 
-            // 2. Left Eye Wink Action (Click/Trigger)
-            if (settings.enableLeftEyeClick && leftEyeOpen != null && rightEyeOpen != null && !isLookingDown && !isEyebrowGestureActive) {
+            // 2. Left Eye Wink Action (Click/Trigger) — suppressed when head is moving
+            if (settings.enableLeftEyeClick && leftEyeOpen != null && rightEyeOpen != null
+                    && isHeadStill && !isLookingDown && !isEyebrowGestureActive) {
                 if (leftEyeOpen < settings.blinkThreshold && rightEyeOpen > (settings.blinkThreshold + 0.35f)) {
                     gestureName = "Left Eye Wink (Back/Option)"
                 }
             }
 
             // 3. Smile Action (Main Select click)
-            if (settings.enableSmileClick && smileProb != null) {
+            if (settings.enableSmileClick && smileProb != null && isHeadStill) {
                 if (smileProb > settings.smileClickThreshold) {
                     gestureName = "Stylized Smile (Confirm/Select)"
                 }
             }
 
-            // 4. Mouth Stretch / Open Action — requires 220ms hold to avoid random triggers
-            if (settings.enableMouthOpenAction && mouthOpenRatio != null) {
+            // 4. Mouth Open — requires still head + 220ms hold
+            if (settings.enableMouthOpenAction && mouthOpenRatio != null && isHeadStill) {
                 if (mouthOpenRatio > settings.mouthOpenThreshold) {
                     if (mouthOpenStartMs == 0L) mouthOpenStartMs = now
                     if (now - mouthOpenStartMs >= mouthOpenHoldMs) {
@@ -588,8 +597,9 @@ class MainViewModel(
             }
         }
 
-        // Evaluate continuous eyebrow scrolling gestures independently with a much faster debounce (450ms)
-        if (settings.enableEyebrowScroll && browHeightRatio != null) {
+        // Evaluate continuous eyebrow scrolling — gated on isHeadStill
+        // Head tilts and nods no longer trigger scroll gestures
+        if (settings.enableEyebrowScroll && isHeadStill && browHeightRatio != null) {
             if (now - lastScrollTimeMs > scrollCooldownMs) {
                 if (browHeightRatio > settings.browRaiseThreshold) {
                     lastScrollTimeMs = now
