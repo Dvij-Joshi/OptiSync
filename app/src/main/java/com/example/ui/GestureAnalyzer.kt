@@ -114,8 +114,6 @@ class GestureAnalyzer(
                         browHeightRatio = null,
                         browHorizontalRatio = null,
                         isHeadStill = false,
-                        imgW = imageProxy.width,
-                        imgH = imageProxy.height,
                         latency = latency,
                         procFps = activeProcessFps,
                         camFps = activeCameraFps,
@@ -147,14 +145,19 @@ class GestureAnalyzer(
                 val leftEyebrowContour = face.getContour(FaceContour.LEFT_EYEBROW_TOP)?.points
                 val rightEyebrowContour = face.getContour(FaceContour.RIGHT_EYEBROW_TOP)?.points
 
-                var browHeightRatio: Float? = null
-                var browHorizontalRatio: Float? = null
-
                 val pW = imageProxy.width.toFloat()
                 val pH = imageProxy.height.toFloat()
 
+                // Normalize nose position to 0..1 screen space where (0.5, 0.5) is dead center
+                val mappedNose = noseLandmark?.let { getNormalizedPoint(it.position, pW, pH, imageRotation, true) }
+                val nosePos = mappedNose // For compatibility with existing code
+                val noseDeltaXFromCenter = mappedNose?.let { it.x - 0.5f } ?: 0f
+                val noseDeltaYFromCenter = mappedNose?.let { it.y - 0.5f } ?: 0f
+
+                var browHeightRatio: Float? = null
+                var browHorizontalRatio: Float? = null
+
                 if (noseLandmark != null && leftEyeLandmark != null && rightEyeLandmark != null) {
-                    val nosePos = noseLandmark.position
                     val leftPos = leftEyeLandmark.position
                     val rightPos = rightEyeLandmark.position
 
@@ -193,15 +196,12 @@ class GestureAnalyzer(
 
                     // Auto center neutral nose reference on first capture frame
                     if (neutralNoseX == null || neutralNoseY == null) {
-                        neutralNoseX = nosePos.x
-                        neutralNoseY = nosePos.y
+                        neutralNoseX = nosePos!!.x
+                        neutralNoseY = nosePos!!.y
                     }
 
-                    // Normalize nose delta by inter-eye distance so sensitivity is
-                    // consistent regardless of how far the user is from the camera.
-                    // A value of 1.0 = moved one eye-width from center.
-                    val noseDeltaX = if (eyeDistance > 5f) (nosePos.x - neutralNoseX!!) / eyeDistance else 0f
-                    val noseDeltaY = if (eyeDistance > 5f) (nosePos.y - neutralNoseY!!) / eyeDistance else 0f
+                    val noseDeltaX = nosePos!!.x - neutralNoseX!!
+                    val noseDeltaY = nosePos!!.y - neutralNoseY!!
 
                     // Mouth open ratio — anchored to eye midpoint, not nose
                     // Eye midpoint is stable across head tilts; nose-to-mouth was not.
@@ -243,8 +243,6 @@ class GestureAnalyzer(
                         browHeightRatio = browHeightRatio,
                         browHorizontalRatio = browHorizontalRatio,
                         isHeadStill = isHeadStill,
-                        imgW = pW.toInt(),
-                        imgH = pH.toInt(),
                         latency = latency,
                         procFps = activeProcessFps,
                         camFps = activeCameraFps,
@@ -263,8 +261,6 @@ class GestureAnalyzer(
                         browHeightRatio = null,
                         browHorizontalRatio = null,
                         isHeadStill = false,
-                        imgW = pW.toInt(),
-                        imgH = pH.toInt(),
                         latency = latency,
                         procFps = activeProcessFps,
                         camFps = activeCameraFps,
@@ -282,11 +278,13 @@ class GestureAnalyzer(
     /**
      * Build a selective set of landmark points for overlay rendering.
      *
-     * Returns raw NORMALIZED sensor coordinates: u = x/pW, v = y/pH.
-     * The Canvas overlay applies the full rotation + FILL_CENTER transform
-     * using the actual image dimensions from imageDimensions StateFlow.
+     * Only includes: LEFT_EYE, RIGHT_EYE, NOSE_BASE, left/right eyebrow contours,
+     * and optionally mouth landmarks when enabled.
      *
-     * Selective points: eyes, eyebrows, nose, optionally mouth.
+     * Coordinate mapping corrected for front camera:
+     * - The image from the front camera arrives rotated (usually 270° in portrait).
+     * - ML Kit coordinates are in the sensor image space (not mirrored).
+     * - We apply the rotation transform then let the canvas mirror via (1-x).
      */
     private fun buildSelectiveLandmarkPoints(
         face: com.google.mlkit.vision.face.Face,
@@ -302,6 +300,7 @@ class GestureAnalyzer(
 
         val rawPoints = mutableListOf<android.graphics.PointF>()
 
+        // Core tracking landmarks only
         val coreLandmarkTypes = mutableListOf(
             FaceLandmark.LEFT_EYE,
             FaceLandmark.RIGHT_EYE,
@@ -316,17 +315,42 @@ class GestureAnalyzer(
         coreLandmarkTypes.forEach { type ->
             face.getLandmark(type)?.position?.let { rawPoints.add(it) }
         }
-        leftEyebrowContour?.forEach  { rawPoints.add(it) }
+
+        // Eyebrow contour points for visual feedback during calibration
+        leftEyebrowContour?.forEach { rawPoints.add(it) }
         rightEyebrowContour?.forEach { rawPoints.add(it) }
-        face.getContour(FaceContour.LEFT_EYE)?.points?.forEach  { rawPoints.add(it) }
+
+        // Left/right eye contours for better visual representation
+        face.getContour(FaceContour.LEFT_EYE)?.points?.forEach { rawPoints.add(it) }
         face.getContour(FaceContour.RIGHT_EYE)?.points?.forEach { rawPoints.add(it) }
 
-        // Store raw normalized sensor coordinates.
-        // Encode imageRotation in a way the Canvas can retrieve it alongside imageDimensions.
-        // Point2D(u, v) where u=x/pW, v=y/pH — rotation is handled in Canvas.
         return rawPoints.map { pos ->
-            Point2D(pos.x / pW, pos.y / pH)
+            getNormalizedPoint(pos, pW, pH, imageRotation, true)
         }
     }
-}
 
+    /**
+     * Maps raw camera sensor coordinates into a consistent 0.0 to 1.0 screen space.
+     * Properly handles 90°/270° orientation rotation and front-camera mirroring
+     * so that the resulting points directly match what the user sees on screen.
+     */
+    private fun getNormalizedPoint(pos: android.graphics.PointF, pW: Float, pH: Float, rotation: Int, isFrontCamera: Boolean): Point2D {
+        val u = pos.x / pW
+        val v = pos.y / pH
+
+        var mappedX = u
+        var mappedY = v
+
+        when (rotation) {
+            90  -> { mappedX = v; mappedY = 1f - u }
+            180 -> { mappedX = 1f - u; mappedY = 1f - v }
+            270 -> { mappedX = 1f - v; mappedY = u }
+        }
+
+        if (isFrontCamera) {
+            mappedX = 1f - mappedX
+        }
+
+        return Point2D(mappedX, mappedY)
+    }
+}
