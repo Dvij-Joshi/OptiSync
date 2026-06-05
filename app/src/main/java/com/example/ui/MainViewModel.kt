@@ -11,6 +11,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.data.GestureSettings
 import com.example.data.OptiSyncDatabase
 import com.example.data.SettingsRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -91,6 +92,10 @@ class MainViewModel(
     // Head-still indicator — true when head pose is within acceptable movement range
     private val _isHeadStill = MutableStateFlow(false)
     val isHeadStill: StateFlow<Boolean> = _isHeadStill.asStateFlow()
+
+    // Camera image dimensions — needed for correct FILL_CENTER overlay coordinate math
+    private val _imageDimensions = MutableStateFlow(Pair(480, 360))
+    val imageDimensions: StateFlow<Pair<Int,Int>> = _imageDimensions.asStateFlow()
 
     // Live tracking probabilities for custom visualization and interactive calibration
     private val _liveLeftEyeOpen = MutableStateFlow<Float?>(null)
@@ -401,9 +406,28 @@ class MainViewModel(
     }
 
     fun updateBrowSquintThreshold(value: Float) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val current = repository.getSettings()
             repository.saveSettings(current.copy(browSquintThreshold = value))
+        }
+    }
+
+    fun updateCalibration(restBrow: Float, upBrow: Float, downBrow: Float, eyeDist: Float) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val current = repository.getSettings()
+            val newVersion = current.calibrationVersion + 1
+            repository.saveSettings(
+                current.copy(
+                    restBrowHeightRatio = restBrow,
+                    peakBrowUpRatio = upBrow,
+                    peakBrowDownRatio = downBrow,
+                    calibrationEyeDistance = eyeDist,
+                    calibrationVersion = newVersion,
+                    // Auto-adjust scroll thresholds based on calibration
+                    browRaiseThreshold = restBrow + (upBrow - restBrow) * 0.65f,
+                    browSquintThreshold = restBrow + (downBrow - restBrow) * 0.65f
+                )
+            )
         }
     }
 
@@ -475,6 +499,8 @@ class MainViewModel(
         browHeightRatio: Float?,
         browHorizontalRatio: Float?,
         isHeadStill: Boolean,
+        imgW: Int,
+        imgH: Int,
         latency: Long,
         procFps: Int,
         camFps: Int,
@@ -482,6 +508,7 @@ class MainViewModel(
     ) {
         _isFaceDetected.value = faceDetected
         _isHeadStill.value = isHeadStill
+        _imageDimensions.value = Pair(imgW, imgH)
         _trackingLatencyMs.value = latency
         _processingFps.value = procFps
         _cameraFps.value = camFps
@@ -504,22 +531,18 @@ class MainViewModel(
         // Read settings directly from StateFlow
         val settings = settingsState.value
 
-        // Distance scaling computation: Sensity is scaled based on how far the user is compared to calibration
-        // If currentEyeDistance is small (farther away), scale factor is larger to keep responsiveness high!
-        val calEyeDist = if (settings.calibrationEyeDistance > 10f) settings.calibrationEyeDistance else 110f
-        val distanceScale = if (eyeDist > 5f) calEyeDist / eyeDist else 1.0f
-        
-        // Final responsive sensitivity
-        val dynamicSensitivity = settings.pointerSensitivity * distanceScale
+        // Nose delta is now normalized by eye distance (value of 1.0 = moved one eye-width).
+        // Multiply by a scale factor to map to the 0-1000 pointer coordinate space.
+        // A typical full-range head movement gives delta of ±3.0, so ×160 → ±480 displacement.
+        val baseScale = settings.pointerSensitivity * 160f
 
-        // Non-linear coordinate amplification to reach all screen corners effortlessly.
-        // It provides high precision (low velocity) near the center but speeds up comfortable screen boundary access.
-        val curvedX = noseX * (1.0f + 0.15f * Math.abs(noseX))
-        val curvedY = noseY * (1.0f + 0.15f * Math.abs(noseY))
+        // Non-linear amplification: gentle near center, faster at extremes
+        val curvedX = noseX * (1.0f + 0.4f * Math.abs(noseX))
+        val curvedY = noseY * (1.0f + 0.4f * Math.abs(noseY))
 
-        // Calculate delta (mirrored coordinates on horizontal since camera faces user)
-        val dX = -curvedX * dynamicSensitivity
-        val dY = curvedY * dynamicSensitivity
+        // Horizontal is mirrored (front camera), vertical is direct
+        val dX = -curvedX * baseScale
+        val dY =  curvedY * baseScale
 
         // Center on screen + displacement
         val targetX = 500f + dX
@@ -541,8 +564,8 @@ class MainViewModel(
         if (now - lastGestureTimeMs > gestureCooldownMs) {
             var gestureName: String? = null
 
-            // Suppress accidental winks when looking down (noseY is positive when looking down)
-            val isLookingDown = noseY > 12f
+            // isLookingDown: normalized delta > 0.5 = looking notably down
+            val isLookingDown = noseY > 0.5f
 
             // Determine if an eyebrow action is actively performed to ignore clicks/winks
             // Also gated on isHeadStill: head movement = no eyebrow gestures
