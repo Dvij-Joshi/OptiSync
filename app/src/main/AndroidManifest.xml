@@ -28,9 +28,8 @@
             </intent-filter>
         </activity>
         <activity
-            android:name=".ui.CalibrationActivity"
+            android:name=".CalibrationActivity"
             android:exported="false"
-            android:windowSoftInputMode="adjustNothing"
             android:theme="@style/Theme.MyApplication" />
     </application>
 

@@ -78,13 +78,7 @@ fun MainLayout(viewModel: MainViewModel) {
         }
     }
 
-    // Auto-launch calibration on first run
-    LaunchedEffect(settings.calibrationVersion) {
-        if (settings.calibrationVersion == 0) {
-            val intent = android.content.Intent(context, com.example.CalibrationActivity::class.java)
-            context.startActivity(intent)
-        }
-    }
+    // Removed forced auto-launch of calibration wizard so users can jump straight in
 
     MyApplicationTheme {
         Scaffold(
