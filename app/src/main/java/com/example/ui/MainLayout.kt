@@ -151,12 +151,14 @@ fun BoxScope.CameraHandler(viewModel: MainViewModel) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
+    var boundCameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
     
     val analyzer = remember { GestureAnalyzer(viewModel) }
 
     // Start running CameraX bound to lifecycle
-    LaunchedEffect(Unit) {
+    LaunchedEffect(lifecycleOwner) {
         val cameraProvider = ProcessCameraProvider.getInstance(context).get()
+        boundCameraProvider = cameraProvider
         val preview = Preview.Builder().build()
         
         // Save preview use-case context for page dual-view overlays
@@ -188,6 +190,15 @@ fun BoxScope.CameraHandler(viewModel: MainViewModel) {
             )
         } catch (exc: Exception) {
             Log.e("OptiSyncCamera", "Camera binding failure", exc)
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            boundCameraProvider?.unbindAll()
+            viewModel.setCameraPreviewUseCase(null)
+            analyzer.close()
+            cameraExecutor.shutdown()
         }
     }
 

@@ -36,9 +36,9 @@ class CalibrationActivity : ComponentActivity() {
                 factory = MainViewModel.Factory(repository, context)
             )
 
-            // Prevent back button from exiting calibration
+            // Let users escape if lighting/tracking is bad, then recalibrate later.
             BackHandler(enabled = true) {
-                // Do nothing to force completion
+                finish()
             }
 
             var hasCameraPermission by androidx.compose.runtime.remember {

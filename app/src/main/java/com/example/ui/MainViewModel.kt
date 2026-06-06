@@ -336,6 +336,9 @@ class MainViewModel(
     // Dedicated scroll debouncer
     private var lastScrollTimeMs = 0L
     private val scrollCooldownMs = 450L
+    private var browGestureCandidate: String? = null
+    private var browGestureStartMs = 0L
+    private val browGestureHoldMs = 180L
 
     // Mouth open hold-timer — requires sustained detection before triggering (prevents false positives)
     private var mouthOpenStartMs = 0L
@@ -487,6 +490,16 @@ class MainViewModel(
         _facePoints.value = landmarks
 
         if (!faceDetected || noseX == null || noseY == null) {
+            _currentEyeDistance.value = 0f
+            _liveLeftEyeOpen.value = null
+            _liveRightEyeOpen.value = null
+            _liveSmileProbability.value = null
+            _liveMouthOpenRatio.value = null
+            _liveBrowHeightRatio.value = null
+            _liveBrowHorizontalRatio.value = null
+            mouthOpenStartMs = 0L
+            browGestureCandidate = null
+            browGestureStartMs = 0L
             return
         }
 
@@ -540,8 +553,8 @@ class MainViewModel(
         if (now - lastGestureTimeMs > gestureCooldownMs) {
             var gestureName: String? = null
 
-            // Suppress accidental winks when looking down (noseY is positive when looking down)
-            val isLookingDown = noseY > 12f
+            // noseY is normalized; around 0.08+ is already a meaningful downward drift.
+            val isLookingDown = noseY > 0.08f
 
             // Determine if an eyebrow action is actively performed to ignore clicks/winks
             // Also gated on isHeadStill: head movement = no eyebrow gestures
@@ -599,23 +612,37 @@ class MainViewModel(
         // Evaluate continuous eyebrow scrolling — gated on isHeadStill
         // Head tilts and nods no longer trigger scroll gestures
         if (settings.enableEyebrowScroll && isHeadStill && browHeightRatio != null) {
-            if (now - lastScrollTimeMs > scrollCooldownMs) {
-                if (browHeightRatio > settings.browRaiseThreshold) {
+            val direction = when {
+                browHeightRatio > settings.browRaiseThreshold -> "UP"
+                browHeightRatio < settings.browSquintThreshold -> "DOWN"
+                else -> null
+            }
+
+            if (direction == null) {
+                browGestureCandidate = null
+                browGestureStartMs = 0L
+            } else {
+                if (browGestureCandidate != direction) {
+                    browGestureCandidate = direction
+                    browGestureStartMs = now
+                }
+
+                if (now - browGestureStartMs >= browGestureHoldMs && now - lastScrollTimeMs > scrollCooldownMs) {
                     lastScrollTimeMs = now
-                    _lastGestureTriggered.value = "Raise Eyebrows (Scroll Up)"
-                    triggerScroll("UP")
-                    if (settings.hapticFeedbackEnabled) {
-                        triggerHapticFeedback()
+                    _lastGestureTriggered.value = if (direction == "UP") {
+                        "Raise Eyebrows (Scroll Up)"
+                    } else {
+                        "Squint Eyebrows (Scroll Down)"
                     }
-                } else if (browHeightRatio < settings.browSquintThreshold) {
-                    lastScrollTimeMs = now
-                    _lastGestureTriggered.value = "Squint Eyebrows (Scroll Down)"
-                    triggerScroll("DOWN")
+                    triggerScroll(direction)
                     if (settings.hapticFeedbackEnabled) {
                         triggerHapticFeedback()
                     }
                 }
             }
+        } else {
+            browGestureCandidate = null
+            browGestureStartMs = 0L
         }
     }
 

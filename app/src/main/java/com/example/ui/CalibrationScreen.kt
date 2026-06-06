@@ -97,11 +97,11 @@ fun CalibrationScreen(viewModel: MainViewModel, onFinish: () -> Unit = {}) {
 
     fun isGestureValid(stepIdx: Int): Boolean {
         return when (stepIdx) {
-            0 -> isFaceDetected  // any face is fine for REST
-            1 -> isFaceDetected && (liveBrowHeight ?: 0f) > (restAvg + 0.05f)   // brows UP
-            2 -> isFaceDetected && (liveBrowHeight ?: 1f) < (restAvg - 0.04f)   // brows DOWN
-            3 -> isFaceDetected && (liveRightEyeOpen ?: 1f) < 0.28f && (liveLeftEyeOpen ?: 0f) > 0.60f
-            4 -> isFaceDetected && (liveLeftEyeOpen ?: 1f) < 0.28f && (liveRightEyeOpen ?: 0f) > 0.60f
+            0 -> isFaceDetected && isHeadStill
+            1 -> isFaceDetected && isHeadStill && (liveBrowHeight ?: 0f) > (restAvg + 0.07f)
+            2 -> isFaceDetected && isHeadStill && (liveBrowHeight ?: 1f) < (restAvg - 0.06f)
+            3 -> isFaceDetected && isHeadStill && (liveRightEyeOpen ?: 1f) < 0.24f && (liveLeftEyeOpen ?: 0f) > 0.65f
+            4 -> isFaceDetected && isHeadStill && (liveLeftEyeOpen ?: 1f) < 0.24f && (liveRightEyeOpen ?: 0f) > 0.65f
             else -> false
         }
     }
@@ -113,11 +113,24 @@ fun CalibrationScreen(viewModel: MainViewModel, onFinish: () -> Unit = {}) {
         else -> ""
     }
 
+    val currentGestureValid = isGestureValid(currentStepIdx)
+
+    fun resetCurrentStepSamples() {
+        sampleCount = 0
+        when (currentStepIdx) {
+            0 -> { sumRest = 0f; capturedEyeDist = 0f }
+            1 -> sumBrowUp = 0f
+            2 -> sumBrowDown = 0f
+            3 -> sumWinkR = 0f
+            4 -> sumWinkL = 0f
+        }
+    }
+
     // ── Auto-start countdown ────────────────────────────────────────────────
     // When face is detected and we're idle (not capturing, not complete),
     // count down 3 seconds then auto-start collecting. Resets if face lost.
-    LaunchedEffect(isFaceDetected, currentStepIdx, isCapturing, isComplete) {
-        if (!isFaceDetected || isCapturing || isComplete) {
+    LaunchedEffect(isFaceDetected, isHeadStill, currentGestureValid, currentStepIdx, isCapturing, isComplete) {
+        if (!isFaceDetected || !isHeadStill || !currentGestureValid || isCapturing || isComplete) {
             autoStartCountdown = 3
             return@LaunchedEffect
         }
@@ -127,8 +140,8 @@ fun CalibrationScreen(viewModel: MainViewModel, onFinish: () -> Unit = {}) {
             autoStartCountdown--
         }
         // Auto-start once countdown finishes and conditions still hold
-        if (isFaceDetected && !isCapturing && !isComplete) {
-            sampleCount = 0
+        if (isFaceDetected && isHeadStill && currentGestureValid && !isCapturing && !isComplete) {
+            resetCurrentStepSamples()
             isCapturing = true
         }
     }
@@ -140,11 +153,21 @@ fun CalibrationScreen(viewModel: MainViewModel, onFinish: () -> Unit = {}) {
     LaunchedEffect(isCapturing, currentStepIdx) {
         if (!isCapturing) return@LaunchedEffect
 
+        var invalidFrames = 0
         while (sampleCount < SAMPLES_NEEDED) {
             delay(50L)  // ~20 fps sampling rate
 
-            // Skip frame if gesture is not currently valid
-            if (!isGestureValid(currentStepIdx)) continue
+            // A valid calibration step should be a clean consecutive window.
+            // If the head drifts or the gesture drops, discard the partial sample set.
+            if (!isGestureValid(currentStepIdx)) {
+                invalidFrames++
+                if (invalidFrames >= 3) {
+                    resetCurrentStepSamples()
+                    invalidFrames = 0
+                }
+                continue
+            }
+            invalidFrames = 0
 
             // Collect sample for current step
             // If eye values are null (e.g., covered by hair), assume 1f (fully open) 
@@ -267,7 +290,7 @@ fun CalibrationScreen(viewModel: MainViewModel, onFinish: () -> Unit = {}) {
 
         // ── Step card ────────────────────────────────────────────────────
         val step = CALIB_STEPS[currentStepIdx]
-        val gestureValid = isGestureValid(currentStepIdx)
+        val gestureValid = currentGestureValid
 
         CalibStepCard(
             step = step,
@@ -289,7 +312,7 @@ fun CalibrationScreen(viewModel: MainViewModel, onFinish: () -> Unit = {}) {
         // ── Manual override button (fallback if auto-start fails) ────────
         if (!isCapturing) {
             Button(
-                onClick = { sampleCount = 0; isCapturing = true; autoStartCountdown = 0 },
+                onClick = { resetCurrentStepSamples(); isCapturing = true; autoStartCountdown = 0 },
                 enabled = isFaceDetected && gestureValid,
                 modifier = Modifier
                     .fillMaxWidth()

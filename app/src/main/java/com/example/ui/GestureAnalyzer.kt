@@ -9,6 +9,7 @@ import com.google.mlkit.vision.face.FaceContour
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
 import com.google.mlkit.vision.face.FaceLandmark
+import kotlin.math.abs
 import kotlin.math.pow
 import kotlin.math.sqrt
 
@@ -45,10 +46,21 @@ class GestureAnalyzer(
     // Frame skip configuration for extreme lag reduction on slow hardware
     private var frameTokenCounter = 0
 
+    // Euler angles alone miss plain head translation, which can look like
+    // eyebrow motion. Keep a tiny motion history to gate calibration/actions.
+    private var lastFrameNose: Point2D? = null
+    private var lastFrameEyeDistance: Float? = null
+
     // Reset neutral camera center anchor
     fun recalibrateCenter() {
         neutralNoseX = null
         neutralNoseY = null
+        lastFrameNose = null
+        lastFrameEyeDistance = null
+    }
+
+    fun close() {
+        detector.close()
     }
 
     @SuppressLint("UnsafeOptInUsageError")
@@ -102,6 +114,8 @@ class GestureAnalyzer(
                 val latency = System.currentTimeMillis() - startTime
 
                 if (faces.isEmpty()) {
+                    lastFrameNose = null
+                    lastFrameEyeDistance = null
                     viewModel.updateTrackData(
                         faceDetected = false,
                         noseX = null,
@@ -129,7 +143,7 @@ class GestureAnalyzer(
                 // Head pose — suppress gesture triggers during head movement
                 val headYaw   = face.headEulerAngleY  // left/right rotation
                 val headPitch = face.headEulerAngleX  // up/down tilt
-                val isHeadStill = Math.abs(headYaw) < 15f && Math.abs(headPitch) < 12f
+                val isPoseStill = abs(headYaw) < 12f && abs(headPitch) < 10f
 
                 // Extract core control landmarks
                 val noseLandmark = face.getLandmark(FaceLandmark.NOSE_BASE)
@@ -145,14 +159,9 @@ class GestureAnalyzer(
                 val leftEyebrowContour = face.getContour(FaceContour.LEFT_EYEBROW_TOP)?.points
                 val rightEyebrowContour = face.getContour(FaceContour.RIGHT_EYEBROW_TOP)?.points
 
-                val pW = imageProxy.width.toFloat()
-                val pH = imageProxy.height.toFloat()
-
                 // Normalize nose position to 0..1 screen space where (0.5, 0.5) is dead center
-                val mappedNose = noseLandmark?.let { getNormalizedPoint(it.position, pW, pH, imageRotation, true) }
+                val mappedNose = noseLandmark?.let { getNormalizedPoint(it.position, imageProxy, imageRotation, true) }
                 val nosePos = mappedNose // For compatibility with existing code
-                val noseDeltaXFromCenter = mappedNose?.let { it.x - 0.5f } ?: 0f
-                val noseDeltaYFromCenter = mappedNose?.let { it.y - 0.5f } ?: 0f
 
                 var browHeightRatio: Float? = null
                 var browHorizontalRatio: Float? = null
@@ -165,6 +174,16 @@ class GestureAnalyzer(
                     val eyeDistance = sqrt(
                         (leftPos.x - rightPos.x).pow(2) + (leftPos.y - rightPos.y).pow(2)
                     )
+
+                    val isHeadStill = nosePos?.let {
+                        updateHeadStillness(isPoseStill, it, eyeDistance)
+                    } ?: false
+
+                    if (nosePos == null) {
+                        updateNoLandmarkTrackData(latency, activeProcessFps, activeCameraFps)
+                        imageProxy.close()
+                        return@addOnSuccessListener
+                    }
 
                     if (eyeDistance > 10f && !leftEyebrowContour.isNullOrEmpty() && !rightEyebrowContour.isNullOrEmpty()) {
                         val leftEyebrowY = leftEyebrowContour.map { it.y }.average().toFloat()
@@ -196,12 +215,12 @@ class GestureAnalyzer(
 
                     // Auto center neutral nose reference on first capture frame
                     if (neutralNoseX == null || neutralNoseY == null) {
-                        neutralNoseX = nosePos!!.x
-                        neutralNoseY = nosePos!!.y
+                        neutralNoseX = nosePos.x
+                        neutralNoseY = nosePos.y
                     }
 
-                    val noseDeltaX = nosePos!!.x - neutralNoseX!!
-                    val noseDeltaY = nosePos!!.y - neutralNoseY!!
+                    val noseDeltaX = nosePos.x - neutralNoseX!!
+                    val noseDeltaY = nosePos.y - neutralNoseY!!
 
                     // Mouth open ratio — anchored to eye midpoint, not nose
                     // Eye midpoint is stable across head tilts; nose-to-mouth was not.
@@ -249,23 +268,9 @@ class GestureAnalyzer(
                         landmarks = visualPoints
                     )
                 } else {
-                    viewModel.updateTrackData(
-                        faceDetected = false,
-                        noseX = null,
-                        noseY = null,
-                        eyeDist = 0f,
-                        leftEyeOpen = null,
-                        rightEyeOpen = null,
-                        smileProb = null,
-                        mouthOpenRatio = null,
-                        browHeightRatio = null,
-                        browHorizontalRatio = null,
-                        isHeadStill = false,
-                        latency = latency,
-                        procFps = activeProcessFps,
-                        camFps = activeCameraFps,
-                        landmarks = emptyList()
-                    )
+                    lastFrameNose = null
+                    lastFrameEyeDistance = null
+                    updateNoLandmarkTrackData(latency, activeProcessFps, activeCameraFps)
                 }
                 imageProxy.close()
             }
@@ -294,17 +299,17 @@ class GestureAnalyzer(
         rightEyebrowContour: List<android.graphics.PointF>?,
         includeMouth: Boolean
     ): List<Point2D> {
-        val pW = imageProxy.width.toFloat()
-        val pH = imageProxy.height.toFloat()
+        val pW = uprightImageWidth(imageProxy, imageRotation)
+        val pH = uprightImageHeight(imageProxy, imageRotation)
         if (pW <= 1f || pH <= 1f) return emptyList()
 
         val rawPoints = mutableListOf<android.graphics.PointF>()
 
         // Core tracking landmarks only
         val coreLandmarkTypes = mutableListOf(
+            FaceLandmark.NOSE_BASE,
             FaceLandmark.LEFT_EYE,
-            FaceLandmark.RIGHT_EYE,
-            FaceLandmark.NOSE_BASE
+            FaceLandmark.RIGHT_EYE
         )
         if (includeMouth) {
             coreLandmarkTypes.add(FaceLandmark.MOUTH_BOTTOM)
@@ -325,7 +330,7 @@ class GestureAnalyzer(
         face.getContour(FaceContour.RIGHT_EYE)?.points?.forEach { rawPoints.add(it) }
 
         return rawPoints.map { pos ->
-            getNormalizedPoint(pos, pW, pH, imageRotation, true)
+            getNormalizedPoint(pos, imageProxy, imageRotation, true)
         }
     }
 
@@ -334,23 +339,67 @@ class GestureAnalyzer(
      * Properly handles 90°/270° orientation rotation and front-camera mirroring
      * so that the resulting points directly match what the user sees on screen.
      */
-    private fun getNormalizedPoint(pos: android.graphics.PointF, pW: Float, pH: Float, rotation: Int, isFrontCamera: Boolean): Point2D {
-        val u = pos.x / pW
-        val v = pos.y / pH
-
-        var mappedX = u
-        var mappedY = v
-
-        when (rotation) {
-            90  -> { mappedX = v; mappedY = 1f - u }
-            180 -> { mappedX = 1f - u; mappedY = 1f - v }
-            270 -> { mappedX = 1f - v; mappedY = u }
-        }
-
+    private fun getNormalizedPoint(
+        pos: android.graphics.PointF,
+        imageProxy: ImageProxy,
+        rotation: Int,
+        isFrontCamera: Boolean
+    ): Point2D {
+        val pW = uprightImageWidth(imageProxy, rotation)
+        val pH = uprightImageHeight(imageProxy, rotation)
+        var mappedX = (pos.x / pW).coerceIn(0f, 1f)
+        val mappedY = (pos.y / pH).coerceIn(0f, 1f)
         if (isFrontCamera) {
             mappedX = 1f - mappedX
         }
-
         return Point2D(mappedX, mappedY)
+    }
+
+    private fun uprightImageWidth(imageProxy: ImageProxy, rotation: Int): Float {
+        return if (rotation == 90 || rotation == 270) imageProxy.height.toFloat() else imageProxy.width.toFloat()
+    }
+
+    private fun uprightImageHeight(imageProxy: ImageProxy, rotation: Int): Float {
+        return if (rotation == 90 || rotation == 270) imageProxy.width.toFloat() else imageProxy.height.toFloat()
+    }
+
+    private fun updateHeadStillness(isPoseStill: Boolean, nose: Point2D, eyeDistance: Float): Boolean {
+        val previousNose = lastFrameNose
+        val previousEyeDistance = lastFrameEyeDistance
+
+        lastFrameNose = nose
+        if (eyeDistance > 10f) {
+            lastFrameEyeDistance = eyeDistance
+        }
+
+        if (!isPoseStill || previousNose == null || previousEyeDistance == null || eyeDistance <= 10f) {
+            return false
+        }
+
+        val noseVelocity = sqrt(
+            (nose.x - previousNose.x).pow(2) + (nose.y - previousNose.y).pow(2)
+        )
+        val depthChange = abs(eyeDistance - previousEyeDistance) / previousEyeDistance
+        return noseVelocity < 0.018f && depthChange < 0.08f
+    }
+
+    private fun updateNoLandmarkTrackData(latency: Long, procFps: Int, camFps: Int) {
+        viewModel.updateTrackData(
+            faceDetected = false,
+            noseX = null,
+            noseY = null,
+            eyeDist = 0f,
+            leftEyeOpen = null,
+            rightEyeOpen = null,
+            smileProb = null,
+            mouthOpenRatio = null,
+            browHeightRatio = null,
+            browHorizontalRatio = null,
+            isHeadStill = false,
+            latency = latency,
+            procFps = procFps,
+            camFps = camFps,
+            landmarks = emptyList()
+        )
     }
 }
