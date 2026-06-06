@@ -195,7 +195,6 @@ fun BoxScope.CameraHandler(viewModel: MainViewModel) {
 
     DisposableEffect(Unit) {
         onDispose {
-            boundCameraProvider?.unbindAll()
             viewModel.setCameraPreviewUseCase(null)
             analyzer.close()
             cameraExecutor.shutdown()
