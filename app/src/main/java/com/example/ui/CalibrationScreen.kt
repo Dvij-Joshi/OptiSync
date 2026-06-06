@@ -126,23 +126,36 @@ fun CalibrationScreen(viewModel: MainViewModel, onFinish: () -> Unit = {}) {
         }
     }
 
-    // ── Auto-start countdown ────────────────────────────────────────────────
-    // When face is detected and we're idle (not capturing, not complete),
-    // count down 3 seconds then auto-start collecting. Resets if face lost.
-    LaunchedEffect(isFaceDetected, isHeadStill, currentGestureValid, currentStepIdx, isCapturing, isComplete) {
-        if (!isFaceDetected || !isHeadStill || !currentGestureValid || isCapturing || isComplete) {
-            autoStartCountdown = 3
-            return@LaunchedEffect
-        }
-        autoStartCountdown = 3
-        repeat(3) {
-            delay(1000L)
-            autoStartCountdown--
-        }
-        // Auto-start once countdown finishes and conditions still hold
-        if (isFaceDetected && isHeadStill && currentGestureValid && !isCapturing && !isComplete) {
-            resetCurrentStepSamples()
-            isCapturing = true
+    LaunchedEffect(currentStepIdx, isCapturing, isComplete) {
+        if (isCapturing || isComplete) return@LaunchedEffect
+
+        while (true) {
+            delay(100L) // Polling interval
+            
+            // Only start countdown if all conditions are met
+            if (isFaceDetected && isHeadStill && isGestureValid(currentStepIdx)) {
+                autoStartCountdown = 3
+                var interrupted = false
+                
+                for (i in 0 until 3) {
+                    delay(1000L)
+                    autoStartCountdown--
+                    
+                    // Check if conditions failed during the countdown second
+                    if (!isFaceDetected || !isHeadStill || !isGestureValid(currentStepIdx)) {
+                        interrupted = true
+                        break
+                    }
+                }
+                
+                if (!interrupted) {
+                    resetCurrentStepSamples()
+                    isCapturing = true
+                    break // Exit the polling loop, capture begins
+                }
+            } else {
+                autoStartCountdown = 3
+            }
         }
     }
 
@@ -186,16 +199,13 @@ fun CalibrationScreen(viewModel: MainViewModel, onFinish: () -> Unit = {}) {
             sampleCount++
         }
 
-        // All samples collected for this step
-        delay(900L)  // brief pause before advancing
+        delay(900L)
 
         if (currentStepIdx < CALIB_STEPS.lastIndex) {
             currentStepIdx++
             sampleCount = 0
             isCapturing = false
-            // Auto-restart for next step happens via the countdown LaunchedEffect above
         } else {
-            // Final step done — compute and save all thresholds
             val n = SAMPLES_NEEDED.toFloat()
             viewModel.saveFullCalibration(
                 restBrow     = sumRest   / n,

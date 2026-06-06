@@ -321,13 +321,13 @@ class GestureAnalyzer(
             face.getLandmark(type)?.position?.let { rawPoints.add(it) }
         }
 
-        // Eyebrow contour points for visual feedback during calibration
-        leftEyebrowContour?.forEach { rawPoints.add(it) }
-        rightEyebrowContour?.forEach { rawPoints.add(it) }
+        // Eyebrow contour points for visual feedback during calibration (thinned out)
+        leftEyebrowContour?.filterIndexed { index, _ -> index % 3 == 0 }?.forEach { rawPoints.add(it) }
+        rightEyebrowContour?.filterIndexed { index, _ -> index % 3 == 0 }?.forEach { rawPoints.add(it) }
 
-        // Left/right eye contours for better visual representation
-        face.getContour(FaceContour.LEFT_EYE)?.points?.forEach { rawPoints.add(it) }
-        face.getContour(FaceContour.RIGHT_EYE)?.points?.forEach { rawPoints.add(it) }
+        // Left/right eye contours for better visual representation (thinned out)
+        face.getContour(FaceContour.LEFT_EYE)?.points?.filterIndexed { index, _ -> index % 3 == 0 }?.forEach { rawPoints.add(it) }
+        face.getContour(FaceContour.RIGHT_EYE)?.points?.filterIndexed { index, _ -> index % 3 == 0 }?.forEach { rawPoints.add(it) }
 
         return rawPoints.map { pos ->
             getNormalizedPoint(pos, imageProxy, imageRotation, true)
