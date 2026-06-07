@@ -83,36 +83,70 @@ fun DashboardScreen(viewModel: MainViewModel) {
                 }
                 
                 // Minimalist status bar pill
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(
-                            if (isFaceDetected) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
-                            else MaterialTheme.colorScheme.error.copy(alpha = 0.1f)
-                        )
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(
+                                if (isFaceDetected) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                                else MaterialTheme.colorScheme.error.copy(alpha = 0.1f)
+                            )
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(8.dp)
-                                .clip(CircleShape)
-                                .background(
-                                    if (isFaceDetected) Color(0xFF00E5FF)
-                                    else Color(0xFFFF2D55)
-                                )
-                        )
-                        Text(
-                            text = if (isFaceDetected) "TRACKING ACTIVE" else "NO FACE FOUND",
-                            style = MaterialTheme.typography.bodySmall.copy(
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 11.sp
-                            ),
-                            color = if (isFaceDetected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        if (isFaceDetected) Color(0xFF00E5FF)
+                                        else Color(0xFFFF2D55)
+                                    )
+                            )
+                            Text(
+                                text = if (isFaceDetected) "TRACKING" else "NO FACE",
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.sp
+                                ),
+                                color = if (isFaceDetected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
+
+                    // Recenter button — tap to make current nose position the new center
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f))
+                            .clickable { viewModel.requestCenterRecalibration() }
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Face,
+                                contentDescription = "Recenter pointer",
+                                modifier = Modifier.size(13.dp),
+                                tint = MaterialTheme.colorScheme.secondary
+                            )
+                            Text(
+                                text = "RECENTER",
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.sp
+                                ),
+                                color = MaterialTheme.colorScheme.secondary
+                            )
+                        }
                     }
                 }
             }

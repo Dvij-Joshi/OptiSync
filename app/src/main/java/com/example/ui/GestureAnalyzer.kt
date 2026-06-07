@@ -380,7 +380,8 @@ class GestureAnalyzer(
             (nose.x - previousNose.x).pow(2) + (nose.y - previousNose.y).pow(2)
         )
         val depthChange = abs(eyeDistance - previousEyeDistance) / previousEyeDistance
-        return noseVelocity < 0.018f && depthChange < 0.08f
+        // Normalized coords: 0.006 is ~0.6% of screen width per frame — enough to detect movement without hair-trigger false positives
+        return noseVelocity < 0.006f && depthChange < 0.12f
     }
 
     private fun updateNoLandmarkTrackData(latency: Long, procFps: Int, camFps: Int) {

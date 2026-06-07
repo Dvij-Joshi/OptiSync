@@ -136,6 +136,9 @@ class MainViewModel(
 
     fun requestCenterRecalibration() {
         _recalibrateCenterRequested.value = true
+        rawPointerX = 500f
+        rawPointerY = 500f
+        _pointerPosition.value = Point2D(500f, 500f)
     }
 
     fun onRecalibrateCenterProcessed() {

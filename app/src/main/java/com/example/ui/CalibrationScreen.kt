@@ -98,8 +98,8 @@ fun CalibrationScreen(viewModel: MainViewModel, onFinish: () -> Unit = {}) {
     fun isGestureValid(stepIdx: Int): Boolean {
         return when (stepIdx) {
             0 -> isFaceDetected && isHeadStill
-            1 -> isFaceDetected && isHeadStill && (liveBrowHeight ?: 0f) > (restAvg + 0.04f)
-            2 -> isFaceDetected && isHeadStill && (liveBrowHeight ?: 1f) < (restAvg - 0.015f)
+            1 -> isFaceDetected && (liveBrowHeight ?: 0f) > (restAvg + 0.04f)  // no head-still: raising brows can shift face slightly
+            2 -> isFaceDetected && (liveBrowHeight ?: 1f) < (restAvg - 0.015f) // no head-still: squinting pulls face muscles
             3 -> isFaceDetected && isHeadStill && (liveRightEyeOpen ?: 1f) < 0.35f && (liveLeftEyeOpen ?: 0f) > 0.50f
             4 -> isFaceDetected && isHeadStill && (liveLeftEyeOpen ?: 1f) < 0.35f && (liveRightEyeOpen ?: 0f) > 0.50f
             else -> false
