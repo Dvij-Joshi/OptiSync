@@ -253,13 +253,12 @@ fun DashboardScreen(viewModel: MainViewModel) {
                         val cardColor by animateColorAsState(
                             targetValue = when {
                                 target.isHit -> Color(0xFF00E5FF)
-                                isHovered -> MaterialTheme.colorScheme.primary.copy(alpha = 0.85f)
                                 else -> MaterialTheme.colorScheme.surface
                             }
                         )
 
-                        val borderGlow = if (isHovered) 2.dp else 1.dp
-                        val borderColor = if (isHovered) Color(0xFF00E5FF) else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
+                        val borderGlow = 1.dp
+                        val borderColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
 
                         // Render simulated deck tile button
                         Box(
@@ -290,7 +289,7 @@ fun DashboardScreen(viewModel: MainViewModel) {
                                         else -> Icons.Default.Home
                                     },
                                     contentDescription = target.label,
-                                    tint = if (isHovered || target.isHit) Color.White else MaterialTheme.colorScheme.onSurface,
+                                    tint = if (target.isHit) Color.White else MaterialTheme.colorScheme.onSurface,
                                     modifier = Modifier.size(24.dp)
                                 )
                                 Spacer(modifier = Modifier.height(4.dp))
@@ -301,7 +300,7 @@ fun DashboardScreen(viewModel: MainViewModel) {
                                         fontSize = 10.sp,
                                         letterSpacing = 0.sp
                                     ),
-                                    color = if (isHovered || target.isHit) Color.White else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                                    color = if (target.isHit) Color.White else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
                                     textAlign = TextAlign.Center
                                 )
                             }

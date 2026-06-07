@@ -359,7 +359,7 @@ class MainViewModel(
     private val scrollCooldownMs = 450L
     private var browGestureCandidate: String? = null
     private var browGestureStartMs = 0L
-    private val browGestureHoldMs = 180L
+    private val browGestureHoldMs = 350L  // must hold eyebrow gesture for 350ms before it counts (stops flickers)
 
     // Mouth open hold-timer — requires sustained detection before triggering (prevents false positives)
     private var mouthOpenStartMs = 0L
@@ -558,7 +558,7 @@ class MainViewModel(
         // Scale to 0-1000 screen space. sensitivity=6 default * 2500 base = 15000 total.
         // A ±0.2 head turn maps to ±(0.2 * 15000/6) = ±500, filling the whole screen.
         val dynamicSensitivity = settings.pointerSensitivity * distanceScale
-        val dX = -curvedX * dynamicSensitivity * 400f
+        val dX =  curvedX * dynamicSensitivity * 400f  // positive = right (getNormalizedPoint already mirrors front cam X)
         val dY =  curvedY * dynamicSensitivity * 400f
 
         val targetX = 500f + dX
@@ -582,10 +582,10 @@ class MainViewModel(
             // noseY is normalized; around 0.08+ is already a meaningful downward drift.
             val isLookingDown = noseY > 0.08f
 
-            // Determine if an eyebrow action is actively performed to ignore clicks/winks
-            // Also gated on isHeadStill: head movement = no eyebrow gestures
-            val isEyebrowGestureActive = settings.enableEyebrowScroll && isHeadStill && browHeightRatio != null &&
-                    (browHeightRatio > settings.browRaiseThreshold || browHeightRatio < settings.browSquintThreshold)
+            // Only block winks when an eyebrow gesture is *confirmed* (held long enough), not on a fleeting flicker
+            val isEyebrowGestureActive = settings.enableEyebrowScroll && isHeadStill &&
+                    browGestureCandidate != null && browGestureStartMs > 0L &&
+                    (System.currentTimeMillis() - browGestureStartMs) >= browGestureHoldMs
 
             // 1. Right Eye Wink Action (Click/Trigger) — suppressed when head is moving
             if (settings.enableRightEyeClick && rightEyeOpen != null && leftEyeOpen != null
