@@ -79,6 +79,8 @@ fun MainLayout(viewModel: MainViewModel) {
     }
 
     // Removed forced auto-launch of calibration wizard so users can jump straight in
+    // Calibration is shown as a fullscreen overlay inside MainLayout so it shares this ViewModel
+    val showCalibration by viewModel.showCalibrationOverlay.collectAsState()
 
     MyApplicationTheme {
         Scaffold(
@@ -136,6 +138,20 @@ fun MainLayout(viewModel: MainViewModel) {
 
                     // Real-time Gestures Activity Notification Toast alert
                     GestureToastAlert(viewModel = viewModel)
+
+                    // Fullscreen Calibration Overlay — shares same ViewModel + camera session
+                    if (showCalibration) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(MaterialTheme.colorScheme.background)
+                        ) {
+                            CalibrationScreen(
+                                viewModel = viewModel,
+                                onFinish = { viewModel.hideCalibrationOverlay() }
+                            )
+                        }
+                    }
                 } else {
                     CameraPermissionDeniedView {
                         launcher.launch(Manifest.permission.CAMERA)

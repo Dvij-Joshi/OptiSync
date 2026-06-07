@@ -61,10 +61,7 @@ fun SettingsScreen(viewModel: MainViewModel) {
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface.copy(0.7f)
                 )
                 Button(
-                    onClick = {
-                        val intent = android.content.Intent(context, com.example.CalibrationActivity::class.java)
-                        context.startActivity(intent)
-                    },
+                    onClick = { viewModel.showCalibrationOverlay() },
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.fillMaxWidth().height(48.dp)
                 ) {

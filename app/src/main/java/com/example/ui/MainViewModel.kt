@@ -136,6 +136,8 @@ class MainViewModel(
 
     fun requestCenterRecalibration() {
         _recalibrateCenterRequested.value = true
+        neutralNoseX = null
+        neutralNoseY = null
         rawPointerX = 500f
         rawPointerY = 500f
         _pointerPosition.value = Point2D(500f, 500f)
@@ -144,6 +146,22 @@ class MainViewModel(
     fun onRecalibrateCenterProcessed() {
         _recalibrateCenterRequested.value = false
     }
+
+    // Calibration overlay flag — shows CalibrationScreen fullscreen inside MainActivity
+    private val _showCalibrationOverlay = MutableStateFlow(false)
+    val showCalibrationOverlay: StateFlow<Boolean> = _showCalibrationOverlay.asStateFlow()
+
+    fun showCalibrationOverlay() { _showCalibrationOverlay.value = true }
+    fun hideCalibrationOverlay() {
+        _showCalibrationOverlay.value = false
+        // Re-center after calibration so user starts from a fresh reference point
+        requestCenterRecalibration()
+    }
+
+    // Neutral nose reference — set on first frame and on Recenter
+    // Pointer moves relative to this position, so wherever you look when you tap Recenter = center
+    private var neutralNoseX: Float? = null
+    private var neutralNoseY: Float? = null
 
     // Step-by-Step Calibration Wizard:
     // 0: Neutral Comfort Center Focus
@@ -523,21 +541,26 @@ class MainViewModel(
         val calEyeDist = if (settings.calibrationEyeDistance > 10f) settings.calibrationEyeDistance else 110f
         val distanceScale = if (eyeDist > 5f) calEyeDist / eyeDist else 1.0f
 
-        // noseX and noseY are absolute normalized positions (0.0 = left/top, 1.0 = right/bottom).
-        // Offset from screen center (0.5) so that looking straight ahead = pointer at center.
-        val offsetX = noseX - 0.5f   // range roughly -0.5 .. +0.5
-        val offsetY = noseY - 0.5f
+        // Set neutral reference on first frame (or after Recenter)
+        if (neutralNoseX == null || neutralNoseY == null) {
+            neutralNoseX = noseX
+            neutralNoseY = noseY
+        }
 
-        // Non-linear amplification: fast at edges, precise at center
-        val curvedX = offsetX * (1.0f + 1.5f * Math.abs(offsetX))
-        val curvedY = offsetY * (1.0f + 1.5f * Math.abs(offsetY))
+        // Delta from neutral: 0 when looking straight ahead, ±~0.2 at extremes
+        val deltaX = noseX - neutralNoseX!!
+        val deltaY = noseY - neutralNoseY!!
 
-        // Apply sensitivity + distance scale. X is mirrored (front camera).
+        // Non-linear amplification: precise at center, fast at edges
+        val curvedX = deltaX * (1.0f + 3.0f * Math.abs(deltaX))
+        val curvedY = deltaY * (1.0f + 3.0f * Math.abs(deltaY))
+
+        // Scale to 0-1000 screen space. sensitivity=6 default * 2500 base = 15000 total.
+        // A ±0.2 head turn maps to ±(0.2 * 15000/6) = ±500, filling the whole screen.
         val dynamicSensitivity = settings.pointerSensitivity * distanceScale
-        val dX = -curvedX * dynamicSensitivity * 1000f
-        val dY =  curvedY * dynamicSensitivity * 1000f
+        val dX = -curvedX * dynamicSensitivity * 400f
+        val dY =  curvedY * dynamicSensitivity * 400f
 
-        // Center on screen + displacement
         val targetX = 500f + dX
         val targetY = 500f + dY
 
