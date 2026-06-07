@@ -195,6 +195,7 @@ fun BoxScope.CameraHandler(viewModel: MainViewModel) {
 
     DisposableEffect(Unit) {
         onDispose {
+            boundCameraProvider?.unbindAll()
             viewModel.setCameraPreviewUseCase(null)
             analyzer.close()
             cameraExecutor.shutdown()
@@ -216,6 +217,7 @@ fun BoxScope.CameraHandler(viewModel: MainViewModel) {
         // Simple graphical tracking circle to show detection status without wasting energy processing preview views
         val isFaceDetected by viewModel.isFaceDetected.collectAsState()
         val facePoints by viewModel.facePoints.collectAsState()
+        val pointerPos by viewModel.pointerPosition.collectAsState()
 
         Canvas(modifier = Modifier.fillMaxSize()) {
             val center = Offset(size.width / 2f, size.height / 2f)
@@ -228,17 +230,16 @@ fun BoxScope.CameraHandler(viewModel: MainViewModel) {
             )
 
             if (isFaceDetected && facePoints.isNotEmpty()) {
-                // Nose Tip
-                val nosePoint = facePoints.firstOrNull()
-                if (nosePoint != null) {
-                    drawCircle(
-                        color = Color(0xFF00E5FF),
-                        radius = 4.dp.toPx(),
-                        center = Offset(nosePoint.x * size.width, nosePoint.y * size.height)
-                    )
-                }
+                // Drive mini dot from actual pointer position (0-1000 range -> 0-size range)
+                val dotX = (pointerPos.x / 1000f) * size.width
+                val dotY = (pointerPos.y / 1000f) * size.height
+                drawCircle(
+                    color = Color(0xFF00E5FF),
+                    radius = 4.dp.toPx(),
+                    center = Offset(dotX, dotY)
+                )
 
-                // Eyes & Mouth Bounds
+                // Other face points as small dots
                 facePoints.drop(1).forEach { pt ->
                     drawCircle(
                         color = Color.White.copy(alpha = 0.8f),

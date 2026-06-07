@@ -516,33 +516,33 @@ class MainViewModel(
         // Read settings directly from StateFlow
         val settings = settingsState.value
 
-        // Distance scaling computation: Sensity is scaled based on how far the user is compared to calibration
-        // If currentEyeDistance is small (farther away), scale factor is larger to keep responsiveness high!
+        // Distance scaling: when far away (small eyeDistance), amplify movement so you can still reach corners
         val calEyeDist = if (settings.calibrationEyeDistance > 10f) settings.calibrationEyeDistance else 110f
         val distanceScale = if (eyeDist > 5f) calEyeDist / eyeDist else 1.0f
-        
-        // Final responsive sensitivity
+
+        // noseX and noseY are absolute normalized positions (0.0 = left/top, 1.0 = right/bottom).
+        // Offset from screen center (0.5) so that looking straight ahead = pointer at center.
+        val offsetX = noseX - 0.5f   // range roughly -0.5 .. +0.5
+        val offsetY = noseY - 0.5f
+
+        // Non-linear amplification: fast at edges, precise at center
+        val curvedX = offsetX * (1.0f + 1.5f * Math.abs(offsetX))
+        val curvedY = offsetY * (1.0f + 1.5f * Math.abs(offsetY))
+
+        // Apply sensitivity + distance scale. X is mirrored (front camera).
         val dynamicSensitivity = settings.pointerSensitivity * distanceScale
-
-        // Non-linear coordinate amplification to reach all screen corners effortlessly.
-        // It provides high precision (low velocity) near the center but speeds up comfortable screen boundary access.
-        val curvedX = noseX * (1.0f + 0.15f * Math.abs(noseX))
-        val curvedY = noseY * (1.0f + 0.15f * Math.abs(noseY))
-
-        // Calculate delta (mirrored coordinates on horizontal since camera faces user)
-        val dX = -curvedX * dynamicSensitivity
-        val dY = curvedY * dynamicSensitivity
+        val dX = -curvedX * dynamicSensitivity * 1000f
+        val dY =  curvedY * dynamicSensitivity * 1000f
 
         // Center on screen + displacement
         val targetX = 500f + dX
         val targetY = 500f + dY
 
-        // Interpolate for seamless movement (Exponential low-pass filter alpha is 0.25f)
+        // Exponential low-pass filter for smooth movement
         val alpha = 0.25f
         rawPointerX = rawPointerX * (1f - alpha) + targetX * alpha
         rawPointerY = rawPointerY * (1f - alpha) + targetY * alpha
 
-        // Clamping to screen space coordinates
         val clampedX = max(20f, min(980f, rawPointerX))
         val clampedY = max(20f, min(980f, rawPointerY))
 

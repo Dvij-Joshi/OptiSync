@@ -252,8 +252,8 @@ class GestureAnalyzer(
 
                     viewModel.updateTrackData(
                         faceDetected = true,
-                        noseX = noseDeltaX,
-                        noseY = noseDeltaY,
+                        noseX = nosePos.x,
+                        noseY = nosePos.y,
                         eyeDist = eyeDistance,
                         leftEyeOpen = face.leftEyeOpenProbability,
                         rightEyeOpen = face.rightEyeOpenProbability,
@@ -299,8 +299,8 @@ class GestureAnalyzer(
         rightEyebrowContour: List<android.graphics.PointF>?,
         includeMouth: Boolean
     ): List<Point2D> {
-        val pW = imageProxy.width.toFloat()
-        val pH = imageProxy.height.toFloat()
+        val pW = uprightImageWidth(imageProxy, imageRotation)
+        val pH = uprightImageHeight(imageProxy, imageRotation)
         if (pW <= 1f || pH <= 1f) return emptyList()
 
         val rawPoints = mutableListOf<android.graphics.PointF>()
@@ -334,29 +334,33 @@ class GestureAnalyzer(
         }
     }
 
+    /**
+     * Maps raw camera sensor coordinates into a consistent 0.0 to 1.0 screen space.
+     * Properly handles 90°/270° orientation rotation and front-camera mirroring
+     * so that the resulting points directly match what the user sees on screen.
+     */
     private fun getNormalizedPoint(
         pos: android.graphics.PointF,
         imageProxy: ImageProxy,
         rotation: Int,
         isFrontCamera: Boolean
     ): Point2D {
-        val rawU = pos.x / imageProxy.width.toFloat()
-        val rawV = pos.y / imageProxy.height.toFloat()
-        
-        var mappedX = rawU
-        var mappedY = rawV
-
-        when (rotation) {
-            90  -> { mappedX = rawV; mappedY = 1f - rawU }
-            180 -> { mappedX = 1f - rawU; mappedY = 1f - rawV }
-            270 -> { mappedX = 1f - rawV; mappedY = rawU }
-        }
-
+        val pW = uprightImageWidth(imageProxy, rotation)
+        val pH = uprightImageHeight(imageProxy, rotation)
+        var mappedX = (pos.x / pW).coerceIn(0f, 1f)
+        val mappedY = (pos.y / pH).coerceIn(0f, 1f)
         if (isFrontCamera) {
             mappedX = 1f - mappedX
         }
-        
-        return Point2D(mappedX.coerceIn(0f, 1f), mappedY.coerceIn(0f, 1f))
+        return Point2D(mappedX, mappedY)
+    }
+
+    private fun uprightImageWidth(imageProxy: ImageProxy, rotation: Int): Float {
+        return if (rotation == 90 || rotation == 270) imageProxy.height.toFloat() else imageProxy.width.toFloat()
+    }
+
+    private fun uprightImageHeight(imageProxy: ImageProxy, rotation: Int): Float {
+        return if (rotation == 90 || rotation == 270) imageProxy.width.toFloat() else imageProxy.height.toFloat()
     }
 
     private fun updateHeadStillness(isPoseStill: Boolean, nose: Point2D, eyeDistance: Float): Boolean {
