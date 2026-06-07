@@ -321,10 +321,12 @@ class MainViewModel(
             val current = repository.getSettings()
 
             // Brow raise threshold: 65% of the way from rest to peak raise
-            val browRaise = restBrow + (peakBrowUp - restBrow) * 0.65f
+            val browRaiseRaw = restBrow + (peakBrowUp - restBrow) * 0.65f
+            val browRaise = if (browRaiseRaw - restBrow < 0.02f) restBrow + 0.02f else browRaiseRaw
 
             // Brow squint threshold: 65% of the way from rest down to peak squint
-            val browSquint = restBrow - (restBrow - peakBrowDown) * 0.65f
+            val browSquintRaw = restBrow - (restBrow - peakBrowDown) * 0.65f
+            val browSquint = if (restBrow - browSquintRaw < 0.015f) restBrow - 0.015f else browSquintRaw
 
             // Blink threshold: midpoint between winking (peak = small value) and open (rest ≈ 0.9)
             // Average the two eyes' wink values, then set threshold halfway between wink and open
@@ -558,8 +560,8 @@ class MainViewModel(
         // Scale to 0-1000 screen space. sensitivity=6 default * 2500 base = 15000 total.
         // A ±0.2 head turn maps to ±(0.2 * 15000/6) = ±500, filling the whole screen.
         val dynamicSensitivity = settings.pointerSensitivity * distanceScale
-        val dX =  curvedX * dynamicSensitivity * 400f  // positive = right (getNormalizedPoint already mirrors front cam X)
-        val dY =  curvedY * dynamicSensitivity * 400f
+        val dX =  curvedX * dynamicSensitivity * 1000f  // positive = right (getNormalizedPoint already mirrors front cam X)
+        val dY =  curvedY * dynamicSensitivity * 1000f
 
         val targetX = 500f + dX
         val targetY = 500f + dY
@@ -590,7 +592,7 @@ class MainViewModel(
             // 1. Right Eye Wink Action (Click/Trigger) — suppressed when head is moving
             if (settings.enableRightEyeClick && rightEyeOpen != null && leftEyeOpen != null
                     && isHeadStill && !isLookingDown && !isEyebrowGestureActive) {
-                if (rightEyeOpen < settings.blinkThreshold && leftEyeOpen > (settings.blinkThreshold + 0.35f)) {
+                if (rightEyeOpen < settings.blinkThreshold && leftEyeOpen > 0.50f) {
                     gestureName = "Right Eye Wink (Click/Trigger)"
                 }
             }
@@ -598,7 +600,7 @@ class MainViewModel(
             // 2. Left Eye Wink Action (Click/Trigger) — suppressed when head is moving
             if (settings.enableLeftEyeClick && leftEyeOpen != null && rightEyeOpen != null
                     && isHeadStill && !isLookingDown && !isEyebrowGestureActive) {
-                if (leftEyeOpen < settings.blinkThreshold && rightEyeOpen > (settings.blinkThreshold + 0.35f)) {
+                if (leftEyeOpen < settings.blinkThreshold && rightEyeOpen > 0.50f) {
                     gestureName = "Left Eye Wink (Back/Option)"
                 }
             }
